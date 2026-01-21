@@ -234,7 +234,7 @@ flowchart TD
     
     style Start fill:#e1f5ff
     style End fill:#c8e6c9
-    style Abort fill:#ffcdd2
+    style Abort fill:#ffcdd2DD
     style UpdateHeartbeat fill:#fff9c4
     style CheckExpired fill:#fff9c4
 ```
