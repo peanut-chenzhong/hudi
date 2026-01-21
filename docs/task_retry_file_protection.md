@@ -2,7 +2,7 @@
 
 ## 概述
 
-本文档描述了针对单作业内 Task 重试导致的文件损坏问题的解决方案。该方案**利用现有的 writeToken 机制**，无需修改 marker 文件命名规范，完全向后兼容。
+本文档描述了针对单作业内 Task 重试导致的文件损坏问题的解决方案。该方案**利用现有的 writeToken 机制**，无需修改 marker 文件命名规范，**无需实现 task 级别心跳**，完全向后兼容。
 
 ## 问题场景
 
@@ -74,12 +74,24 @@ file-abc123_0-5-1_20240115120000000.parquet.marker.APPEND
 
 **这意味着：无需修改 marker 命名规范，只需解析 writeToken 即可检测 attempt 冲突！**
 
+### 为什么不需要心跳机制？
+
+由于 writeToken 机制，不同 task attempt 写的是**不同的物理文件**：
+
+| 场景 | 原始 task 状态 | 处理方式 | 结果 |
+|-----|--------------|---------|------|
+| 原始 task 还活着 | 假死但仍在写 | 两者都各写各的文件 | 两份独立文件，commit 时去重 |
+| 原始 task 已死 | 真正失败 | 重试 task 正常写入 | 正常 |
+| 原始 task 刚完成 | 已完成 | 重试 task rollover 后写入 | 两份文件，commit 时去重 |
+
+**关键点**：由于 writeToken 机制保证文件名唯一，无论原始 task 是否还活着，都不会出现两个 task 写同一个物理文件的情况。
+
 ## 详细流程图
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                    Task 重试场景的文件保护方案                                    │
-│                   (基于 writeToken 解析，完全向后兼容)                            │
+│               (基于 writeToken 解析，无需心跳，完全向后兼容)                       │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
                               ┌───────────────────────┐
@@ -132,47 +144,32 @@ file-abc123_0-5-1_20240115120000000.parquet.marker.APPEND
        └──────────┬──────────┘                    └────────────┬────────────┘
                   │                                            │
                   ▼                                            ▼
-       ┌─────────────────────┐               ╔═════════════════════════════════╗
-       │ 创建 marker 文件     │               ║   判断：我是重试 task 吗？       ║
-       │ (文件名包含当前      │               ║   (attemptNumber > 0)            ║
-       │  writeToken)         │               ╚═══════════════╤═════════════════╝
-       └──────────┬──────────┘                               │
-                  │                             ┌─────────────┴─────────────┐
-                  │                             │                           │
-                  │                             ▼                           ▼
-                  │                  ┌─────────────────────┐    ┌─────────────────────┐
-                  │                  │  是重试 task         │    │  是原始 task         │
-                  │                  │  (attemptNumber > 0) │    │  (attemptNumber = 0) │
-                  │                  └──────────┬──────────┘    └──────────┬──────────┘
-                  │                             │                          │
-                  │                             ▼                          ▼
-                  │              ┌─────────────────────────┐   ┌─────────────────────┐
-                  │              │  【强制 Rollover】       │   │  检查原 task marker  │
-                  │              │  创建新的 log 文件版本   │   │  的心跳是否过期      │
-                  │              │                         │   └──────────┬──────────┘
-                  │              │  新文件名自动包含新的    │              │
-                  │              │  writeToken，保证唯一   │    ┌────────┴────────┐
-                  │              │                         │    │                 │
-                  │              │  例如:                   │    ▼                 ▼
-                  │              │  原: .log.1_0-5-0       │  ┌──────────────┐  ┌──────────────┐
-                  │              │  新: .log.2_0-5-1       │  │ 心跳过期      │  │ 心跳正常     │
-                  │              └──────────┬──────────────┘  │ 原task可能死  │  │ 原task还活   │
-                  │                         │                 └───────┬──────┘  └───────┬──────┘
-                  │                         │                         │                 │
-                  │                         │                         ▼                 ▼
-                  │                         │                 ┌──────────────┐  ┌──────────────┐
-                  │                         │                 │ 继续写入     │  │ 等待/放弃    │
-                  │                         │                 │ 原task的marker│  │ 让重试task   │
-                  │                         │                 │ 会被清理     │  │ 接管         │
-                  │                         │                 └───────┬──────┘  └──────────────┘
-                  │                         │                         │
-                  └─────────────────────────┼─────────────────────────┘
-                                            │
-                                            ▼
-                             ┌──────────────────────────────┐
-                             │    安全地写入数据文件         │
-                             │    不会与其他 attempt 冲突    │
-                             └──────────────────────────────┘
+       ┌─────────────────────┐               ┌─────────────────────────────────┐
+       │ 创建 marker 文件     │               │   【强制 Rollover】              │
+       │ (文件名包含当前      │               │   创建新的 log 文件版本          │
+       │  writeToken)         │               │                                 │
+       └──────────┬──────────┘               │   新文件名自动包含当前           │
+                  │                          │   writeToken，保证文件名唯一     │
+                  │                          │                                 │
+                  │                          │   例如:                         │
+                  │                          │   原 task: .log.1_0-5-0        │
+                  │                          │   重试 task: .log.2_0-5-1      │
+                  │                          └──────────────┬──────────────────┘
+                  │                                         │
+                  └────────────────────┬───────────────────┘
+                                       │
+                                       ▼
+                          ┌─────────────────────────┐
+                          │    创建 marker 文件      │
+                          │    写入数据文件          │
+                          │    （各写各的，互不干扰） │
+                          └─────────────────────────┘
+                                       │
+                                       ▼
+                          ┌─────────────────────────┐
+                          │   Commit 阶段处理去重    │
+                          │   只保留成功的 attempt   │
+                          └─────────────────────────┘
 ```
 
 ## Marker 文件目录结构示例
@@ -276,25 +273,23 @@ public boolean hasOtherAttemptWriting(String partitionPath, String fileId,
 
 ```java
 /**
- * 处理 task attempt 冲突
+ * 处理 task attempt 冲突 - 简化版，无需心跳
+ * 
+ * 核心思路：由于 writeToken 机制保证不同 attempt 写不同物理文件，
+ * 检测到冲突时直接 rollover 即可，无需关心其他 task 的状态。
  */
 public void handleAttemptConflict(HoodieLogFormatWriter writer, 
                                    String fileId, 
                                    String currentWriteToken) {
-    int currentAttempt = WriteTokenParser.extractAttemptNumber(currentWriteToken);
-    
-    if (currentAttempt > 0) {
-        // 重试 task：强制 rollover 到新 log 文件
+    if (hasOtherAttemptWriting(partitionPath, fileId, currentWriteToken)) {
+        // 检测到其他 attempt 存在，强制 rollover 到新 log 文件
         // 新文件自动使用当前 writeToken，保证文件名唯一
-        LOG.info("Retry task (attempt=" + currentAttempt + ") detected conflict, " +
-                 "forcing rollover to new log file");
+        int currentAttempt = WriteTokenParser.extractAttemptNumber(currentWriteToken);
+        LOG.info("Task (attempt={}) detected other attempt writing same fileId: {}, " +
+                 "forcing rollover to ensure file isolation", currentAttempt, fileId);
         writer.rollOver();
-    } else {
-        // 原始 task：检查重试 task 是否还活着
-        // 如果重试 task 活跃，考虑放弃当前写入
-        LOG.warn("Original task detected retry task, checking heartbeat...");
-        // ... 心跳检测逻辑
     }
+    // 继续正常写入，各 task 写各自的文件，互不干扰
 }
 ```
 
@@ -307,6 +302,8 @@ public void handleAttemptConflict(HoodieLogFormatWriter writer,
 | **利用现有机制** | writeToken 已包含 attemptNumber |
 | **新老客户端兼容** | 老客户端正常工作，新客户端增加检测 |
 | **无迁移成本** | 无需升级现有表格式 |
+| **无需心跳机制** | 简化实现，降低复杂度 |
+| **实现简单** | 只需解析文件名 + 强制 rollover |
 
 ## 与分区级并发检测的对比
 
@@ -316,24 +313,268 @@ public void handleAttemptConflict(HoodieLogFormatWriter writer,
 | 冲突检测粒度 | 分区级 | 文件级 (fileId + writeToken) |
 | 检测依据 | 分区目录是否存在 | 解析 marker 文件名中的 writeToken |
 | 需要锁 | 是 (ZK 分区锁) | 否 |
+| 需要心跳 | 否 | 否 |
 | 修改 marker 格式 | 否 | 否 |
 | 向后兼容 | 是 | 是 |
 | 冲突处理方式 | 抛出异常，任务失败 | 强制 rollover 到新文件 |
 
-## 配置参数（建议）
+## 配置参数
 
 ```properties
 # 启用 task attempt 冲突检测
 hoodie.write.task.attempt.conflict.detection.enable=true
+```
 
-# 检测到其他 attempt 时的处理策略
-# ROLLOVER: 强制创建新文件（推荐）
-# FAIL: 抛出异常
-# WAIT: 等待原 task 完成
-hoodie.write.task.attempt.conflict.strategy=ROLLOVER
+## Spark 使用方法
 
-# 心跳超时时间（用于判断原 task 是否还活着）
-hoodie.write.task.heartbeat.timeout.ms=60000
+### Spark DataSource API
+
+```scala
+import org.apache.hudi.DataSourceWriteOptions._
+import org.apache.hudi.config.HoodieWriteConfig._
+
+val hudiOptions = Map(
+  "hoodie.table.name" -> "my_table",
+  "hoodie.datasource.write.recordkey.field" -> "id",
+  "hoodie.datasource.write.partitionpath.field" -> "partition",
+  "hoodie.datasource.write.precombine.field" -> "ts",
+  
+  // 启用 task attempt 冲突检测
+  "hoodie.write.task.attempt.conflict.detection.enable" -> "true"
+)
+
+df.write
+  .format("hudi")
+  .options(hudiOptions)
+  .mode("append")
+  .save("/path/to/hudi/table")
+```
+
+### Spark SQL
+
+```sql
+-- 创建表时配置
+CREATE TABLE hudi_table (
+  id INT,
+  name STRING,
+  ts TIMESTAMP,
+  partition STRING
+) USING hudi
+PARTITIONED BY (partition)
+TBLPROPERTIES (
+  'hoodie.write.task.attempt.conflict.detection.enable' = 'true'
+);
+
+-- 或者通过 SET 命令配置
+SET hoodie.write.task.attempt.conflict.detection.enable=true;
+
+INSERT INTO hudi_table VALUES (1, 'Alice', current_timestamp(), '2024-01');
+```
+
+### Spark Structured Streaming
+
+```scala
+import org.apache.hudi.DataSourceWriteOptions._
+
+val hudiOptions = Map(
+  "hoodie.table.name" -> "streaming_table",
+  "hoodie.datasource.write.recordkey.field" -> "id",
+  "hoodie.datasource.write.partitionpath.field" -> "partition",
+  "hoodie.datasource.write.precombine.field" -> "ts",
+  "hoodie.datasource.write.operation" -> "upsert",
+  
+  // 启用 task attempt 冲突检测（流式场景推荐开启）
+  "hoodie.write.task.attempt.conflict.detection.enable" -> "true"
+)
+
+streamingDF.writeStream
+  .format("hudi")
+  .options(hudiOptions)
+  .option("checkpointLocation", "/path/to/checkpoint")
+  .outputMode("append")
+  .start("/path/to/hudi/table")
+```
+
+### HoodieWriteClient API
+
+```java
+import org.apache.hudi.client.SparkRDDWriteClient;
+import org.apache.hudi.config.HoodieWriteConfig;
+
+HoodieWriteConfig writeConfig = HoodieWriteConfig.newBuilder()
+    .withPath("/path/to/hudi/table")
+    .withSchema(schema)
+    // 启用 task attempt 冲突检测
+    .withTaskAttemptConflictDetectionEnable(true)
+    .build();
+
+SparkRDDWriteClient<HoodieRecordPayload> client = 
+    new SparkRDDWriteClient<>(engineContext, writeConfig);
+
+// 执行写入操作
+client.upsert(records, instantTime);
+```
+
+## Flink 使用方法
+
+### Flink SQL
+
+```sql
+-- 创建 Hudi 表
+CREATE TABLE hudi_table (
+  id INT,
+  name STRING,
+  ts TIMESTAMP(3),
+  partition STRING
+) PARTITIONED BY (partition)
+WITH (
+  'connector' = 'hudi',
+  'path' = '/path/to/hudi/table',
+  'table.type' = 'MERGE_ON_READ',
+  
+  -- 启用 task attempt 冲突检测
+  'hoodie.write.task.attempt.conflict.detection.enable' = 'true'
+);
+
+-- 插入数据
+INSERT INTO hudi_table VALUES (1, 'Alice', TIMESTAMP '2024-01-15 12:00:00', '2024-01');
+```
+
+### Flink DataStream API
+
+```java
+import org.apache.hudi.configuration.FlinkOptions;
+
+Configuration conf = new Configuration();
+conf.setString(FlinkOptions.PATH, "/path/to/hudi/table");
+conf.setString(FlinkOptions.TABLE_TYPE, "MERGE_ON_READ");
+conf.setString(FlinkOptions.RECORD_KEY_FIELD, "id");
+conf.setString(FlinkOptions.PARTITION_PATH_FIELD, "partition");
+conf.setString(FlinkOptions.PRECOMBINE_FIELD, "ts");
+
+// 启用 task attempt 冲突检测
+conf.setBoolean("hoodie.write.task.attempt.conflict.detection.enable", true);
+
+DataStream<RowData> dataStream = ...;
+
+HoodiePipeline.Builder builder = HoodiePipeline.builder("hudi_table")
+    .column("id INT")
+    .column("name STRING")
+    .column("ts TIMESTAMP(3)")
+    .column("partition STRING")
+    .pk("id")
+    .partition("partition")
+    .options(conf);
+
+builder.sink(dataStream, false);
+env.execute("Flink Hudi Write Job");
+```
+
+### Flink Table API
+
+```java
+import org.apache.flink.table.api.EnvironmentSettings;
+import org.apache.flink.table.api.TableEnvironment;
+
+EnvironmentSettings settings = EnvironmentSettings.newInstance()
+    .inStreamingMode()
+    .build();
+TableEnvironment tableEnv = TableEnvironment.create(settings);
+
+// 设置全局配置
+tableEnv.getConfig().getConfiguration()
+    .setString("hoodie.write.task.attempt.conflict.detection.enable", "true");
+
+// 创建表
+tableEnv.executeSql("""
+    CREATE TABLE hudi_table (
+      id INT,
+      name STRING,
+      ts TIMESTAMP(3),
+      partition STRING,
+      PRIMARY KEY (id) NOT ENFORCED
+    ) PARTITIONED BY (partition)
+    WITH (
+      'connector' = 'hudi',
+      'path' = '/path/to/hudi/table',
+      'table.type' = 'MERGE_ON_READ',
+      'hoodie.write.task.attempt.conflict.detection.enable' = 'true'
+    )
+    """);
+```
+
+## 使用建议
+
+### 何时启用
+
+| 场景 | 建议 | 原因 |
+|-----|------|------|
+| **MOR 表 + 流式写入** | ✅ 强烈推荐 | 流式场景 task 重试频繁，log 文件追加模式风险高 |
+| **MOR 表 + 批量写入** | ✅ 推荐 | 批量写入时间长，也可能触发 task 重试 |
+| **COW 表** | ⚠️ 可选 | COW 表每次创建新文件，风险相对较低 |
+| **对象存储 (S3/OSS/GCS)** | ✅ 强烈推荐 | 对象存储 append 无租约保护，冲突风险更高 |
+| **HDFS** | ⚠️ 可选 | HDFS 有租约机制，但假死场景仍可能出问题 |
+
+### 性能影响
+
+- **开销极小**：仅在 log 文件打开时扫描 marker 目录
+- **无分布式锁**：不涉及 ZK 等外部依赖
+- **无网络调用**：只是本地/对象存储的目录 list 操作
+
+### 与其他配置的配合
+
+```properties
+# 1. 基础配置
+hoodie.write.task.attempt.conflict.detection.enable=true
+
+# 2. 搭配推测执行（Spark）
+# 注意：开启推测执行后更需要此功能
+spark.speculation=true
+spark.speculation.interval=100ms
+spark.speculation.multiplier=1.5
+spark.speculation.quantile=0.75
+
+# 3. 搭配 Flink checkpoint
+# Flink 的 checkpoint 失败可能导致 task 重试
+execution.checkpointing.interval=60000
+execution.checkpointing.timeout=600000
+```
+
+## Commit 阶段的去重处理
+
+当同一个 fileId 存在多个 task attempt 的输出时，Commit 阶段需要处理去重：
+
+```java
+/**
+ * Commit 阶段处理多 attempt 输出的去重
+ */
+public List<HoodieWriteStat> deduplicateAttemptOutputs(List<HoodieWriteStat> writeStats) {
+    // 按 fileId 分组
+    Map<String, List<HoodieWriteStat>> statsByFileId = writeStats.stream()
+        .collect(Collectors.groupingBy(HoodieWriteStat::getFileId));
+    
+    List<HoodieWriteStat> result = new ArrayList<>();
+    for (Map.Entry<String, List<HoodieWriteStat>> entry : statsByFileId.entrySet()) {
+        List<HoodieWriteStat> statsForFile = entry.getValue();
+        
+        if (statsForFile.size() == 1) {
+            // 只有一个 attempt，直接使用
+            result.add(statsForFile.get(0));
+        } else {
+            // 多个 attempt，选择 attemptNumber 最大的（最新的重试）
+            HoodieWriteStat latestStat = statsForFile.stream()
+                .max(Comparator.comparingInt(stat -> 
+                    WriteTokenParser.extractAttemptNumber(stat.getPath())))
+                .orElse(statsForFile.get(0));
+            result.add(latestStat);
+            
+            // 其他 attempt 的文件将在后续 cleaning 中被清理
+            LOG.info("FileId {} has {} attempts, keeping attempt with highest attemptNumber",
+                     entry.getKey(), statsForFile.size());
+        }
+    }
+    return result;
+}
 ```
 
 ## 最终效果
@@ -352,4 +593,13 @@ hoodie.write.task.heartbeat.timeout.ms=60000
                                       writeToken 包含 attempt=1
 ```
 
-**两个文件物理上完全独立，不会相互干扰。** Commit 时的 compaction/cleaning 会处理可能的重复数据。
+**两个文件物理上完全独立，不会相互干扰。** Commit 时选择最新 attempt 的输出，其他文件由 cleaning 清理。
+
+## 总结
+
+该方案的核心思想是：**利用 writeToken 天然的唯一性，将"防止冲突写入"转化为"各写各的文件 + Commit 时去重"**，从而：
+
+1. 避免了复杂的心跳机制
+2. 避免了分布式锁
+3. 完全向后兼容
+4. 实现简单可靠

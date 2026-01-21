@@ -584,4 +584,48 @@ public class TestFSUtils extends HoodieCommonTestHarness {
   private StoragePath getHoodieTempDir() {
     return new StoragePath(baseUri.toString(), ".hoodie/.temp");
   }
+
+  // Tests for writeToken parsing methods
+
+  @Test
+  public void testGetAttemptNumberFromWriteToken() {
+    // Normal cases
+    assertEquals(0, FSUtils.getAttemptNumberFromWriteToken("0-5-0"));
+    assertEquals(1, FSUtils.getAttemptNumberFromWriteToken("0-5-1"));
+    assertEquals(99, FSUtils.getAttemptNumberFromWriteToken("10-20-99"));
+
+    // Edge cases
+    assertEquals(-1, FSUtils.getAttemptNumberFromWriteToken(null));
+    assertEquals(-1, FSUtils.getAttemptNumberFromWriteToken(""));
+    assertEquals(-1, FSUtils.getAttemptNumberFromWriteToken("invalid"));
+    assertEquals(-1, FSUtils.getAttemptNumberFromWriteToken("1-2"));  // not enough parts
+    assertEquals(-1, FSUtils.getAttemptNumberFromWriteToken("1-2-abc"));  // non-numeric attempt
+  }
+
+  @Test
+  public void testGetTaskPartitionIdFromWriteToken() {
+    // Normal cases
+    assertEquals(0, FSUtils.getTaskPartitionIdFromWriteToken("0-5-1"));
+    assertEquals(10, FSUtils.getTaskPartitionIdFromWriteToken("10-20-99"));
+    assertEquals(123, FSUtils.getTaskPartitionIdFromWriteToken("123-456-789"));
+
+    // Edge cases
+    assertEquals(-1, FSUtils.getTaskPartitionIdFromWriteToken(null));
+    assertEquals(-1, FSUtils.getTaskPartitionIdFromWriteToken(""));
+    assertEquals(-1, FSUtils.getTaskPartitionIdFromWriteToken("abc-2-3"));  // non-numeric
+  }
+
+  @Test
+  public void testGetStageIdFromWriteToken() {
+    // Normal cases
+    assertEquals(5, FSUtils.getStageIdFromWriteToken("0-5-1"));
+    assertEquals(20, FSUtils.getStageIdFromWriteToken("10-20-99"));
+    assertEquals(456, FSUtils.getStageIdFromWriteToken("123-456-789"));
+
+    // Edge cases
+    assertEquals(-1, FSUtils.getStageIdFromWriteToken(null));
+    assertEquals(-1, FSUtils.getStageIdFromWriteToken(""));
+    assertEquals(-1, FSUtils.getStageIdFromWriteToken("1"));  // not enough parts
+    assertEquals(-1, FSUtils.getStageIdFromWriteToken("1-abc-3"));  // non-numeric stage
+  }
 }

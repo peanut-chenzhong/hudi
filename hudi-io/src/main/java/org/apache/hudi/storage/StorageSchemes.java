@@ -64,7 +64,7 @@ public enum StorageSchemes {
   // IBM Cloud Object Storage
   COS("cos", false, null, null, null),
   // Huawei Cloud Object Storage
-  OBS("obs", false, null, null, null),
+  OBS("obs", true, null, null, null),
   // Kingsoft Standard Storage ks3
   KS3("ks3", false, null, null, null),
   // Netease Object Storage nos

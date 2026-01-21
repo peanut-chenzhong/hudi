@@ -41,6 +41,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * HoodieLogFormatWriter can be used to append blocks to a log file Use HoodieLogFormat.WriterBuilder to construct.
@@ -48,6 +49,8 @@ import java.util.List;
 public class HoodieLogFormatWriter implements HoodieLogFormat.Writer {
 
   private static final Logger LOG = LoggerFactory.getLogger(HoodieLogFormatWriter.class);
+
+  private static final String FS_APPEND_SUPPORTED = "fs.%s.append.support";
 
   private HoodieLogFile logFile;
   private FSDataOutputStream output;
@@ -96,6 +99,7 @@ public class HoodieLogFormatWriter implements HoodieLogFormat.Writer {
       FileSystem fs = (FileSystem) storage.getFileSystem();
       if (fs.exists(path)) {
         boolean isAppendSupported = StorageSchemes.isAppendSupported(fs.getScheme());
+        isAppendSupported = fs.getConf().getBoolean(String.format(FS_APPEND_SUPPORTED, fs.getScheme().toLowerCase(Locale.ROOT)), isAppendSupported);
         // here we use marker file to fence concurrent append to the same file. So it is safe to use speculation in spark now.
         boolean canAppend = isAppendSupported ? logFileWriteCallback.preLogFileOpen(logFile) : false;
         if (canAppend) {
@@ -106,7 +110,7 @@ public class HoodieLogFormatWriter implements HoodieLogFormat.Writer {
           } catch (RemoteException e) {
             LOG.warn("Remote Exception, attempting to handle or recover lease", e);
             handleAppendExceptionOrRecoverLease(path, e);
-          } catch (IOException ioe) {
+          } catch (IOException | UnsupportedOperationException ioe) {
             if (ioe.getMessage().toLowerCase().contains("not supported")) {
               // may still happen if scheme is viewfs.
               isAppendSupported = false;

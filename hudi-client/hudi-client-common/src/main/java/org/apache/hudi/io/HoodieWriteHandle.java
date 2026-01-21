@@ -289,14 +289,31 @@ public abstract class HoodieWriteHandle<T, I, K, O> extends HoodieIOHandle<T, I,
    */
   protected class AppendLogWriteCallback implements HoodieLogFileWriteCallback {
 
+    private final TaskAttemptConflictDetector conflictDetector;
+
+    AppendLogWriteCallback() {
+      this.conflictDetector = config.isTaskAttemptConflictDetectionEnable()
+          ? new TaskAttemptConflictDetector(storage, config.getBasePath(), instantTime)
+          : null;
+    }
+
     @Override
     public boolean preLogFileOpen(HoodieLogFile logFileToAppend) {
+      // Check for task attempt conflicts if enabled
+      if (conflictDetector != null && conflictDetector.shouldForceRollover(partitionPath, fileId, writeToken)) {
+        // Return false to trigger rollover to a new log file
+        // This ensures different task attempts write to different physical files
+        LOG.info("Task attempt conflict detected for fileId: {}, writeToken: {}. Triggering rollover.", 
+            fileId, writeToken);
+        return false;
+      }
       return createAppendMarker(logFileToAppend);
     }
 
     @Override
     public boolean preLogFileCreate(HoodieLogFile logFileToCreate) {
-      // TODO: HUDI-1517 may distinguish log file created from log file being appended in the future @guanziyue
+      // For new file creation, we don't need to check for conflicts
+      // since the new file will have a unique name with our writeToken
       return createAppendMarker(logFileToCreate);
     }
 

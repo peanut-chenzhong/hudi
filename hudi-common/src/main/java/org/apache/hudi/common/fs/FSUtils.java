@@ -113,6 +113,72 @@ public class FSUtils {
     return String.format("%d-%d-%d", taskPartitionId, stageId, taskAttemptId);
   }
 
+  /**
+   * Extracts the attempt number from a write token.
+   * Write token format: {taskPartitionId}-{stageId}-{attemptNumber}
+   *
+   * @param writeToken the write token, e.g., "0-5-1"
+   * @return the attempt number, or -1 if parsing fails
+   */
+  public static int getAttemptNumberFromWriteToken(String writeToken) {
+    if (writeToken == null || writeToken.isEmpty()) {
+      return -1;
+    }
+    String[] parts = writeToken.split("-");
+    if (parts.length >= 3) {
+      try {
+        return Integer.parseInt(parts[2]);
+      } catch (NumberFormatException e) {
+        return -1;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Extracts the task partition ID from a write token.
+   * Write token format: {taskPartitionId}-{stageId}-{attemptNumber}
+   *
+   * @param writeToken the write token, e.g., "0-5-1"
+   * @return the task partition ID, or -1 if parsing fails
+   */
+  public static int getTaskPartitionIdFromWriteToken(String writeToken) {
+    if (writeToken == null || writeToken.isEmpty()) {
+      return -1;
+    }
+    String[] parts = writeToken.split("-");
+    if (parts.length >= 1) {
+      try {
+        return Integer.parseInt(parts[0]);
+      } catch (NumberFormatException e) {
+        return -1;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Extracts the stage ID from a write token.
+   * Write token format: {taskPartitionId}-{stageId}-{attemptNumber}
+   *
+   * @param writeToken the write token, e.g., "0-5-1"
+   * @return the stage ID, or -1 if parsing fails
+   */
+  public static int getStageIdFromWriteToken(String writeToken) {
+    if (writeToken == null || writeToken.isEmpty()) {
+      return -1;
+    }
+    String[] parts = writeToken.split("-");
+    if (parts.length >= 2) {
+      try {
+        return Integer.parseInt(parts[1]);
+      } catch (NumberFormatException e) {
+        return -1;
+      }
+    }
+    return -1;
+  }
+
   public static String makeBaseFileName(String instantTime, String writeToken, String fileId, String fileExtension) {
     return String.format("%s_%s_%s%s", fileId, writeToken, instantTime, fileExtension);
   }
