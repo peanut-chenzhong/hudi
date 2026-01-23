@@ -31,6 +31,7 @@ import org.apache.hadoop.fs.Path;
 
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
 
 import static org.apache.hudi.hadoop.fs.HadoopFSUtils.convertToStoragePath;
 
@@ -88,6 +89,35 @@ public class FlinkWriteHandleFactory {
         HoodieTable<T, I, K, O> table,
         Iterator<HoodieRecord<T>> recordItr
     );
+
+    /**
+     * Get or create a new write handle with task retry protection.
+     *
+     * <p>CAUTION: the method is not thread safe.
+     *
+     * @param bucketToHandles The existing write handles
+     * @param record          The first record in the bucket
+     * @param config          Write config
+     * @param instantTime     The instant time
+     * @param table           The table
+     * @param recordItr       Record iterator
+     * @param createdMarkers  Set of markers created by this task instance (for task retry protection).
+     *                        If null, task retry protection is disabled.
+     *
+     * @return Existing write handle or create a new one
+     */
+    default HoodieWriteHandle<?, ?, ?, ?> create(
+        Map<String, Path> bucketToHandles,
+        HoodieRecord<T> record,
+        HoodieWriteConfig config,
+        String instantTime,
+        HoodieTable<T, I, K, O> table,
+        Iterator<HoodieRecord<T>> recordItr,
+        Set<String> createdMarkers
+    ) {
+      // Default implementation: delegate to original method (no task retry protection)
+      return create(bucketToHandles, record, config, instantTime, table, recordItr);
+    }
   }
 
   /**
@@ -281,6 +311,21 @@ public class FlinkWriteHandleFactory {
       final String partitionPath = record.getPartitionPath();
       final TaskContextSupplier contextSupplier = table.getTaskContextSupplier();
       return new FlinkAppendHandle<>(config, instantTime, table, partitionPath, fileID, recordItr, contextSupplier);
+    }
+
+    @Override
+    public HoodieWriteHandle<?, ?, ?, ?> create(
+        Map<String, Path> bucketToHandles,
+        HoodieRecord<T> record,
+        HoodieWriteConfig config,
+        String instantTime,
+        HoodieTable<T, I, K, O> table,
+        Iterator<HoodieRecord<T>> recordItr,
+        Set<String> createdMarkers) {
+      final String fileID = record.getCurrentLocation().getFileId();
+      final String partitionPath = record.getPartitionPath();
+      final TaskContextSupplier contextSupplier = table.getTaskContextSupplier();
+      return new FlinkAppendHandle<>(config, instantTime, table, partitionPath, fileID, recordItr, contextSupplier, createdMarkers);
     }
   }
 }

@@ -59,9 +59,11 @@ import org.slf4j.LoggerFactory;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
@@ -85,10 +87,35 @@ public class HoodieFlinkWriteClient<T> extends
    */
   private final Map<String, Path> bucketToHandles;
 
+  /**
+   * Set of marker keys created by this task instance within the current instant.
+   * Used for task retry protection: when a retry task starts, its createdMarkers set is empty,
+   * so if it finds an existing marker that it didn't create, it knows there's a conflict.
+   * Format: "{partitionPath}/{fileName}"
+   */
+  private final Set<String> createdMarkers;
+
   public HoodieFlinkWriteClient(HoodieEngineContext context, HoodieWriteConfig writeConfig) {
     super(context, writeConfig, FlinkUpgradeDowngradeHelper.getInstance());
     this.bucketToHandles = new HashMap<>();
+    this.createdMarkers = new HashSet<>();
     this.tableServiceClient = new HoodieFlinkTableServiceClient<>(context, writeConfig, getTimelineServer());
+  }
+
+  /**
+   * Returns the set of markers created by this task instance.
+   * This is used for task retry protection in FlinkAppendHandle.
+   */
+  public Set<String> getCreatedMarkers() {
+    return createdMarkers;
+  }
+
+  /**
+   * Clears the created markers set.
+   * Should be called when switching to a new instant.
+   */
+  public void clearCreatedMarkers() {
+    createdMarkers.clear();
   }
 
   /**
@@ -422,9 +449,11 @@ public class HoodieFlinkWriteClient<T> extends
   /**
    * Clean the write handles within a checkpoint interval.
    * All the handles should have been closed already.
+   * Also clears the created markers for task retry protection.
    */
   public void cleanHandles() {
     this.bucketToHandles.clear();
+    this.createdMarkers.clear();
   }
 
   @Override
@@ -456,7 +485,8 @@ public class HoodieFlinkWriteClient<T> extends
         List<HoodieRecord<T>>,
         List<HoodieKey>,
         List<WriteStatus>> writeHandleFactory = FlinkWriteHandleFactory.getFactory(table.getMetaClient().getTableConfig(), config, overwrite);
-    return writeHandleFactory.create(this.bucketToHandles, record, config, instantTime, table, recordItr);
+    // Pass createdMarkers for task retry protection (only effective for MOR delta commit)
+    return writeHandleFactory.create(this.bucketToHandles, record, config, instantTime, table, recordItr, this.createdMarkers);
   }
 
   public HoodieFlinkTable<T> getHoodieTable() {

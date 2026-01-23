@@ -24,6 +24,7 @@ import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.IOType;
 import org.apache.hudi.common.table.log.HoodieLogFileWriteCallback;
+import org.apache.hudi.common.util.Option;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.table.HoodieTable;
@@ -35,6 +36,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 
 /**
  * A {@link HoodieAppendHandle} that supports APPEND write incrementally(mini-batches).
@@ -53,6 +55,17 @@ public class FlinkAppendHandle<T, I, K, O>
 
   private boolean isClosed = false;
 
+  /**
+   * Set of markers created by this task instance within the current instant.
+   * Used to distinguish between markers created by current task vs other task attempts.
+   * This is shared across multiple FlinkAppendHandle instances within the same task.
+   */
+  private final Set<String> createdMarkers;
+
+  /**
+   * Creates a FlinkAppendHandle without task retry protection.
+   * This constructor is kept for backward compatibility.
+   */
   public FlinkAppendHandle(
       HoodieWriteConfig config,
       String instantTime,
@@ -61,16 +74,70 @@ public class FlinkAppendHandle<T, I, K, O>
       String fileId,
       Iterator<HoodieRecord<T>> recordItr,
       TaskContextSupplier taskContextSupplier) {
+    this(config, instantTime, hoodieTable, partitionPath, fileId, recordItr, taskContextSupplier, null);
+  }
+
+  /**
+   * Creates a FlinkAppendHandle with task retry protection.
+   *
+   * @param config             Write config
+   * @param instantTime        Instant time
+   * @param hoodieTable        Hoodie table
+   * @param partitionPath      Partition path
+   * @param fileId             File ID
+   * @param recordItr          Record iterator
+   * @param taskContextSupplier Task context supplier
+   * @param createdMarkers     Set of markers already created by this task instance.
+   *                           If null, task retry protection is disabled.
+   *                           This set should be shared across all FlinkAppendHandle instances
+   *                           within the same Flink task to track markers created in previous batches.
+   */
+  public FlinkAppendHandle(
+      HoodieWriteConfig config,
+      String instantTime,
+      HoodieTable<T, I, K, O> hoodieTable,
+      String partitionPath,
+      String fileId,
+      Iterator<HoodieRecord<T>> recordItr,
+      TaskContextSupplier taskContextSupplier,
+      Set<String> createdMarkers) {
     super(config, instantTime, hoodieTable, partitionPath, fileId, recordItr, taskContextSupplier);
+    this.createdMarkers = createdMarkers;
   }
 
   protected HoodieLogFileWriteCallback getLogWriteCallback() {
     return new AppendLogWriteCallback() {
       @Override
       public boolean preLogFileOpen(HoodieLogFile logFileToAppend) {
-        // In some rare cases, the task was pulled up again with same write file name,
-        // for e.g, reuse the small log files from last commit instant.
+        String markerKey = partitionPath + "/" + logFileToAppend.getFileName();
 
+        // If task retry protection is enabled (createdMarkers is not null)
+        if (createdMarkers != null) {
+          // Check if marker was created by this task instance in a previous batch
+          if (createdMarkers.contains(markerKey)) {
+            LOG.debug("Marker already created by this task instance, continue appending: {}", markerKey);
+            return true;
+          }
+
+          // Try to create the marker
+          WriteMarkers writeMarkers = WriteMarkersFactory.get(config.getMarkersType(), hoodieTable, instantTime);
+          Option<StoragePath> result = writeMarkers.createIfNotExists(partitionPath, logFileToAppend.getFileName(), IOType.APPEND);
+
+          if (result.isPresent()) {
+            // Marker created successfully, record it
+            createdMarkers.add(markerKey);
+            LOG.info("Marker created successfully for task retry protection: {}", markerKey);
+            return true;
+          } else {
+            // Marker already exists but not created by this task instance
+            // This means another task attempt (e.g., the "zombie" original task) created it
+            LOG.warn("Detected task retry conflict: marker {} exists but was not created by this task instance. "
+                + "Triggering rollover to avoid file corruption.", markerKey);
+            return false;
+          }
+        }
+
+        // Task retry protection disabled, use original behavior
         // Just skip the marker creation if it already exists, the new data would append to
         // the file directly.
         WriteMarkers writeMarkers = WriteMarkersFactory.get(config.getMarkersType(), hoodieTable, instantTime);

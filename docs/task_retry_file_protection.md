@@ -325,6 +325,139 @@ Task 重试保护和分区级并发冲突检测是两个独立的机制：
 
 两个机制可以同时启用，互不冲突。
 
+## Flink 特殊处理
+
+### 问题：Flink Mini-batch 机制
+
+Flink 的写入与 Spark 不同，存在 mini-batch 机制：
+- 同一个 Task 在一个 checkpoint 周期内会多次 flush
+- 每次 flush 可能创建新的 `FlinkAppendHandle` 实例
+- 这些 batch 应该追加到**同一个文件**
+
+**原有问题**：`FlinkAppendHandle.preLogFileOpen()` 总是返回 `true`，不触发 rollover，这导致：
+- 正常 mini-batch：可以追加到同一个文件 ✓
+- Task 重试：无法检测冲突，可能数据损坏 ✗
+
+### 解决方案：本地 Set + createIfNotExists
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                        Flink Task 重试保护机制                                   │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│  核心思路：                                                                       │
+│  - HoodieFlinkWriteClient 维护一个 createdMarkers Set                            │
+│  - 记录当前 Task 实例创建的 marker                                                │
+│  - 用于区分"自己之前 batch 创建的"和"其他 attempt 创建的"                         │
+│                                                                                  │
+│  ┌────────────────────────────────────────────────────────────────────────────┐ │
+│  │  正常 Mini-batch（同一个 Task 实例）                                        │ │
+│  │  ────────────────────────────────────                                       │ │
+│  │  Task-0 (attempt-0):                                                        │ │
+│  │  createdMarkers = {}                                                        │ │
+│  │       │                                                                     │ │
+│  │       ├── Batch-1: createIfNotExists() → 成功, createdMarkers.add("f1")     │ │
+│  │       ├── Batch-2: contains("f1") → true, 跳过创建, 继续追加                │ │
+│  │       └── Batch-3: contains("f1") → true, 跳过创建, 继续追加                │ │
+│  │                                                                             │ │
+│  │  【同一个 Task 实例，Set 一直保持，正常追加同一文件】                         │ │
+│  └────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                  │
+│  ┌────────────────────────────────────────────────────────────────────────────┐ │
+│  │  Task 重试（新的 Task 实例，Set 为空）                                       │ │
+│  │  ──────────────────────────────────────                                     │ │
+│  │  Task-0 (attempt-1):  ← 新实例，createdMarkers = {} (空的)                  │ │
+│  │       │                                                                     │ │
+│  │       └── Batch-1: contains("f1") → false (Set 是空的)                      │ │
+│  │                    createIfNotExists() → Option.empty() (marker 已存在)     │ │
+│  │                    → return false → 触发 rollover!                          │ │
+│  │                                                                             │ │
+│  │  【新实例 Set 为空，检测到其他 attempt 的 marker，触发 rollover】             │ │
+│  └────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                  │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Flink 实现代码
+
+#### 1. HoodieFlinkWriteClient
+
+```java
+public class HoodieFlinkWriteClient<T> extends BaseHoodieWriteClient<T, ...> {
+    
+    // 记录当前 Task 实例创建的 marker
+    private final Set<String> createdMarkers = new HashSet<>();
+    
+    public Set<String> getCreatedMarkers() {
+        return createdMarkers;
+    }
+    
+    // 在切换 instant 时清空
+    public void cleanHandles() {
+        this.bucketToHandles.clear();
+        this.createdMarkers.clear();  // 同时清空 marker 记录
+    }
+}
+```
+
+#### 2. FlinkAppendHandle
+
+```java
+public class FlinkAppendHandle<T, I, K, O> extends HoodieAppendHandle<T, I, K, O> {
+    
+    // 从 WriteClient 传入的 marker 记录
+    private final Set<String> createdMarkers;
+    
+    public FlinkAppendHandle(..., Set<String> createdMarkers) {
+        super(...);
+        this.createdMarkers = createdMarkers;
+    }
+    
+    protected HoodieLogFileWriteCallback getLogWriteCallback() {
+        return new AppendLogWriteCallback() {
+            @Override
+            public boolean preLogFileOpen(HoodieLogFile logFileToAppend) {
+                String markerKey = partitionPath + "/" + logFileToAppend.getFileName();
+                
+                if (createdMarkers != null) {
+                    // 1. 检查是否是自己之前 batch 创建的
+                    if (createdMarkers.contains(markerKey)) {
+                        return true;  // 继续追加
+                    }
+                    
+                    // 2. 尝试创建 marker
+                    WriteMarkers writeMarkers = WriteMarkersFactory.get(...);
+                    Option<StoragePath> result = writeMarkers.createIfNotExists(...);
+                    
+                    if (result.isPresent()) {
+                        // 创建成功，记录到 Set
+                        createdMarkers.add(markerKey);
+                        return true;
+                    } else {
+                        // Marker 已存在，但不是自己创建的 → 冲突！
+                        LOG.warn("Task retry conflict detected, triggering rollover");
+                        return false;  // 触发 rollover
+                    }
+                }
+                
+                // 向后兼容：createdMarkers 为 null 时使用原有行为
+                WriteMarkers writeMarkers = WriteMarkersFactory.get(...);
+                writeMarkers.createIfNotExists(...);
+                return true;
+            }
+        };
+    }
+}
+```
+
+### 判断逻辑矩阵
+
+| 场景 | Set 包含 marker？ | createIfNotExists 结果 | 行为 |
+|------|------------------|------------------------|------|
+| 同一 Task 后续 batch | ✅ 是 | 不需要调用 | 继续追加 |
+| 新 Task 首次写入 | ❌ 否 | 成功 | 记录到 Set，开始写入 |
+| **重试 Task** | ❌ 否（新实例！） | 失败（已存在） | **触发 rollover** |
+
 ## 总结
 
 Task 重试场景的文件保护方案利用 Hudi 现有的 Marker 文件机制：
@@ -333,5 +466,11 @@ Task 重试场景的文件保护方案利用 Hudi 现有的 Marker 文件机制�
 2. **隔离性**：不同 instant 的 Marker 在不同目录，自然隔离
 3. **零配置**：不需要新增配置项或修改现有行为
 4. **向后兼容**：完全兼容现有的文件命名规范和 Marker 机制
+
+**Spark**：直接使用 Marker 的原子创建机制，preLogFileOpen 返回 createIfNotExists 的结果。
+
+**Flink**：由于 mini-batch 机制，需要额外维护 `createdMarkers` Set 来区分"自己之前的 batch"和"其他 attempt"，确保：
+- 正常 mini-batch 可以追加到同一文件
+- 重试 Task 能检测冲突并 rollover
 
 当 Task 重试发生时，重试的 task 会发现 Marker 已存在，自动 rollover 到新的 log 文件，从而避免数据损坏。
