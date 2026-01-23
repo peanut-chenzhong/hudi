@@ -173,3 +173,6 @@ hoodie.write.early.conflict.detection.enable=true
 Spark/Flink 的重试机制会在稍后重试该 task，届时：
 - 如果另一个 instant 已完成：重试成功
 - 如果另一个 instant 仍在进行：继续失败，直到超时或另一方完成
+
+![img.png](img.png)
+![img_1.png](img_1.png)![img_2.png](img_2.png)![img_3.png](img_3.png)![img_4.png](img_4.png)![img_5.png](img_5.png)![img_6.png](img_6.png)

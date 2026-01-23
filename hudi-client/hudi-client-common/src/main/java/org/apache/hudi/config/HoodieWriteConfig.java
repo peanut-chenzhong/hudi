@@ -709,19 +709,6 @@ public class HoodieWriteConfig extends HoodieConfig {
       .withDocumentation("Whether to enable commit conflict checking or not during early "
           + "conflict detection.");
 
-  public static final ConfigProperty<Boolean> TASK_ATTEMPT_CONFLICT_DETECTION_ENABLE = ConfigProperty
-      .key("hoodie.write.task.attempt.conflict.detection.enable")
-      .defaultValue(false)
-      .markAdvanced()
-      .sinceVersion("1.0.0")
-      .withDocumentation("Whether to enable task attempt conflict detection. When enabled, "
-          + "Hudi detects if there are marker files from other task attempts (caused by Spark/Flink "
-          + "task retry mechanism) writing to the same file. If conflict is detected, the current task "
-          + "will force a rollover to a new log file to avoid data corruption from concurrent writes. "
-          + "This is useful when a task is falsely considered dead due to timeout but is actually still "
-          + "writing data. Different task attempts will write to different physical files, and "
-          + "deduplication is handled during the commit phase.");
-
   public static final ConfigProperty<String> SENSITIVE_CONFIG_KEYS_FILTER = ConfigProperty
       .key("hoodie.sensitive.config.keys")
       .defaultValue("ssl,tls,sasl,auth,credentials")
@@ -2519,10 +2506,6 @@ public class HoodieWriteConfig extends HoodieConfig {
 
   public boolean earlyConflictDetectionCheckCommitConflict() {
     return getBoolean(EARLY_CONFLICT_DETECTION_CHECK_COMMIT_CONFLICT);
-  }
-
-  public boolean isTaskAttemptConflictDetectionEnable() {
-    return getBoolean(TASK_ATTEMPT_CONFLICT_DETECTION_ENABLE);
   }
 
   // misc configs

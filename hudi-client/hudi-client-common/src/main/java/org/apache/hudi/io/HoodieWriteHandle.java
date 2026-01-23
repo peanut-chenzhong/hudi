@@ -286,40 +286,30 @@ public abstract class HoodieWriteHandle<T, I, K, O> extends HoodieIOHandle<T, I,
 
   /**
    * Call back to be invoked during log file creation and appends. Applicable only for AppendHandle among all write handles.
+   * 
+   * <p>Task retry protection: If a marker file already exists (created by another task/attempt),
+   * the marker creation will fail, causing preLogFileOpen/preLogFileCreate to return false,
+   * which triggers a rollover to a new log file. This ensures different task attempts write
+   * to different physical files, avoiding data corruption from concurrent writes.
    */
   protected class AppendLogWriteCallback implements HoodieLogFileWriteCallback {
 
-    private final TaskAttemptConflictDetector conflictDetector;
-
-    AppendLogWriteCallback() {
-      this.conflictDetector = config.isTaskAttemptConflictDetectionEnable()
-          ? new TaskAttemptConflictDetector(storage, config.getBasePath(), instantTime)
-          : null;
-    }
-
     @Override
     public boolean preLogFileOpen(HoodieLogFile logFileToAppend) {
-      // Check for task attempt conflicts if enabled
-      if (conflictDetector != null && conflictDetector.shouldForceRollover(partitionPath, fileId, writeToken)) {
-        // Return false to trigger rollover to a new log file
-        // This ensures different task attempts write to different physical files
-        LOG.info("Task attempt conflict detected for fileId: {}, writeToken: {}. Triggering rollover.", 
-            fileId, writeToken);
-        return false;
-      }
+      // Try to create marker file. If marker already exists (another task/attempt is writing),
+      // this returns false, triggering rollover to a new file.
       return createAppendMarker(logFileToAppend);
     }
 
     @Override
     public boolean preLogFileCreate(HoodieLogFile logFileToCreate) {
-      // For new file creation, we don't need to check for conflicts
-      // since the new file will have a unique name with our writeToken
       return createAppendMarker(logFileToCreate);
     }
 
-    private boolean createAppendMarker(HoodieLogFile logFileToAppend) {
+    private boolean createAppendMarker(HoodieLogFile logFile) {
       WriteMarkers writeMarkers = WriteMarkersFactory.get(config.getMarkersType(), hoodieTable, instantTime);
-      return writeMarkers.createIfNotExists(partitionPath, logFileToAppend.getFileName(), IOType.APPEND,
+      // createIfNotExists returns empty if marker already exists, causing rollover
+      return writeMarkers.createIfNotExists(partitionPath, logFile.getFileName(), IOType.APPEND,
           config, fileId, hoodieTable.getMetaClient().getActiveTimeline()).isPresent();
     }
   }
