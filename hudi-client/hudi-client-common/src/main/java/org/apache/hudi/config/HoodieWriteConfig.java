@@ -709,6 +709,17 @@ public class HoodieWriteConfig extends HoodieConfig {
       .withDocumentation("Whether to enable commit conflict checking or not during early "
           + "conflict detection.");
 
+  public static final ConfigProperty<Boolean> EXPIRED_HEARTBEAT_PARTITION_CONFLICT_CHECK_ENABLE = ConfigProperty
+      .key(CONCURRENCY_PREFIX + "expired.heartbeat.partition.conflict.check.enable")
+      .defaultValue(false)
+      .markAdvanced()
+      .withDocumentation("When enabled, checks for writers with expired heartbeats that have marker files "
+          + "in the same partition as the current write. If such a 'falsely dead' writer is detected "
+          + "(heartbeat expired but task may still be running), the current writer will rollover to a new "
+          + "log file instead of appending to the existing one, to prevent data corruption from concurrent "
+          + "writes to the same log file. This is particularly useful in scenarios where a writer's heartbeat "
+          + "expires due to GC pauses or network issues, but the task is still actively writing.");
+
   public static final ConfigProperty<String> SENSITIVE_CONFIG_KEYS_FILTER = ConfigProperty
       .key("hoodie.sensitive.config.keys")
       .defaultValue("ssl,tls,sasl,auth,credentials")
@@ -2508,6 +2519,10 @@ public class HoodieWriteConfig extends HoodieConfig {
     return getBoolean(EARLY_CONFLICT_DETECTION_CHECK_COMMIT_CONFLICT);
   }
 
+  public boolean isExpiredHeartbeatPartitionConflictCheckEnabled() {
+    return getBoolean(EXPIRED_HEARTBEAT_PARTITION_CONFLICT_CHECK_ENABLE);
+  }
+
   // misc configs
   public Boolean doSkipDefaultPartitionValidation() {
     return getBoolean(SKIP_DEFAULT_PARTITION_VALIDATION);
@@ -3106,6 +3121,11 @@ public class HoodieWriteConfig extends HoodieConfig {
 
     public Builder withEarlyConflictDetectionStrategy(String className) {
       writeConfig.setValue(EARLY_CONFLICT_DETECTION_STRATEGY_CLASS_NAME, className);
+      return this;
+    }
+
+    public Builder withExpiredHeartbeatPartitionConflictCheckEnabled(boolean enable) {
+      writeConfig.setValue(EXPIRED_HEARTBEAT_PARTITION_CONFLICT_CHECK_ENABLE, String.valueOf(enable));
       return this;
     }
 

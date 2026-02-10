@@ -341,4 +341,81 @@ public class MarkerUtils {
     String[] ele = marker.split("/");
     return ele[ele.length - 1];
   }
+
+  /**
+   * Checks whether any writer with an expired heartbeat has marker files in the same partition.
+   *
+   * <p>This is used to detect "falsely dead" writers whose heartbeat has expired but the task
+   * may still be running and actively writing to log files. If such a conflict is detected,
+   * the caller should rollover to a new log file instead of appending to the existing one,
+   * preventing data corruption from concurrent writes to the same log file.
+   *
+   * @param storage                           {@link HoodieStorage} instance.
+   * @param basePath                          Base path of the table.
+   * @param currentInstantTime                Current writer's instant time.
+   * @param maxAllowableHeartbeatIntervalInMs Heartbeat timeout in milliseconds.
+   * @param partitionPath                     Partition path to check for conflicts.
+   * @return {@code true} if an expired-heartbeat writer has markers in the same partition;
+   *         {@code false} otherwise.
+   */
+  public static boolean hasExpiredHeartbeatPartitionConflict(
+      HoodieStorage storage,
+      String basePath,
+      String currentInstantTime,
+      long maxAllowableHeartbeatIntervalInMs,
+      String partitionPath) {
+    try {
+      String tempFolderPath = basePath + StoragePath.SEPARATOR + HoodieTableMetaClient.TEMPFOLDER_NAME;
+      StoragePath tempPath = new StoragePath(tempFolderPath);
+      if (!storage.exists(tempPath)) {
+        return false;
+      }
+
+      List<StoragePathInfo> instantDirs = storage.listDirectEntries(tempPath);
+
+      for (StoragePathInfo instantDir : instantDirs) {
+        if (!instantDir.isDirectory()) {
+          continue;
+        }
+        String instantTime = markerDirToInstantTime(instantDir.getPath().toString());
+
+        // Skip current writer's own instant and instants after current
+        if (instantTime.compareToIgnoreCase(currentInstantTime) >= 0) {
+          continue;
+        }
+
+        // Only consider instants with EXPIRED heartbeats
+        try {
+          if (!isHeartbeatExpired(instantTime, maxAllowableHeartbeatIntervalInMs, storage, basePath)) {
+            // Heartbeat is still active, skip (handled by normal ECD)
+            continue;
+          }
+        } catch (IOException e) {
+          // If we can't determine heartbeat status, skip this instant
+          continue;
+        }
+
+        // Check if this expired-heartbeat instant has markers in the same partition
+        StoragePath markerPartitionPath;
+        if (StringUtils.isNullOrEmpty(partitionPath)) {
+          markerPartitionPath = instantDir.getPath();
+        } else {
+          markerPartitionPath = new StoragePath(instantDir.getPath(), partitionPath);
+        }
+
+        if (storage.exists(markerPartitionPath)) {
+          LOG.warn("Detected expired heartbeat writer {} with partition conflict in partition: {}. "
+              + "The writer may be 'falsely dead' and still actively writing. "
+              + "Current writer should rollover to a new log file to avoid potential data corruption.",
+              instantTime, partitionPath);
+          return true;
+        }
+      }
+
+      return false;
+    } catch (IOException e) {
+      LOG.warn("Error checking expired heartbeat partition conflict for partition: " + partitionPath, e);
+      return false;
+    }
+  }
 }
