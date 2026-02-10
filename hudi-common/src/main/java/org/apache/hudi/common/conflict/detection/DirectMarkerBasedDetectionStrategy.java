@@ -104,7 +104,7 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
   public boolean checkMarkerConflict(String basePath, long maxAllowableHeartbeatIntervalInMs) throws IOException {
     String tempFolderPath = basePath + StoragePath.SEPARATOR + HoodieTableMetaClient.TEMPFOLDER_NAME;
 
-    // List .temp directory ONCE, reuse for both active-heartbeat and expired-heartbeat checks
+    // List .temp directory ONCE
     List<StoragePath> allInstantPaths;
     try {
       allInstantPaths = storage.listDirectEntries(new StoragePath(tempFolderPath)).stream()
@@ -114,13 +114,13 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
       allInstantPaths = Collections.emptyList();
     }
 
-    // Active heartbeat instants → fileId-level conflict detection (original logic)
-    List<String> candidateInstants = MarkerUtils.getCandidateInstants(activeTimeline,
-        allInstantPaths,
-        instantTime, maxAllowableHeartbeatIntervalInMs, storage,
-        basePath);
+    // Single-pass classification: each instant's heartbeat is checked ONCE
+    MarkerUtils.InstantClassification classification = MarkerUtils.classifyInstantsByHeartbeat(
+        activeTimeline, allInstantPaths, instantTime,
+        maxAllowableHeartbeatIntervalInMs, storage, basePath);
 
-    long res = candidateInstants.stream().flatMap(currentMarkerDirPath -> {
+    // Active heartbeat instants → fileId-level conflict detection (original logic)
+    long res = classification.activeHeartbeatInstants.stream().flatMap(currentMarkerDirPath -> {
       try {
         StoragePath markerPartitionPath;
         if (StringUtils.isNullOrEmpty(partitionPath)) {
@@ -140,11 +140,9 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
       }
     }).count();
 
-    // Expired heartbeat instants → partition-level conflict detection (reuse same listing)
+    // Expired heartbeat instants → partition-level conflict detection (same classification, zero extra heartbeat IO)
     this.expiredHeartbeatPartitionConflictDetected =
-        MarkerUtils.hasExpiredHeartbeatPartitionConflictFromPaths(
-            storage, allInstantPaths, basePath, instantTime,
-            maxAllowableHeartbeatIntervalInMs, partitionPath);
+        MarkerUtils.hasExpiredHeartbeatInPartition(storage, classification.expiredHeartbeatInstants, partitionPath);
 
     if (res != 0L) {
       LOG.warn("Detected conflict marker files: " + partitionPath + "/" + fileId + " for " + instantTime);

@@ -105,20 +105,18 @@ public class PartitionBasedDirectMarkerDetectionStrategy extends DirectMarkerBas
   private boolean checkPartitionMarkerConflict(String basePath, long maxAllowableHeartbeatIntervalInMs) throws IOException {
     String tempFolderPath = basePath + StoragePath.SEPARATOR + HoodieTableMetaClient.TEMPFOLDER_NAME;
 
-    // List .temp directory ONCE, reuse for both active-heartbeat and expired-heartbeat checks
+    // List .temp directory ONCE
     List<StoragePath> allInstantPaths = storage.listDirectEntries(new StoragePath(tempFolderPath)).stream()
         .map(StoragePathInfo::getPath)
         .collect(Collectors.toList());
 
-    // Get candidate instants (active, non-expired write operations)
-    List<String> candidateInstants = MarkerUtils.getCandidateInstants(activeTimeline,
-        allInstantPaths,
-        instantTime, maxAllowableHeartbeatIntervalInMs, storage,
-        basePath);
+    // Single-pass classification: each instant's heartbeat is checked ONCE
+    MarkerUtils.InstantClassification classification = MarkerUtils.classifyInstantsByHeartbeat(
+        activeTimeline, allInstantPaths, instantTime,
+        maxAllowableHeartbeatIntervalInMs, storage, basePath);
 
-    // Check if any candidate instant has markers in the same partition
-    // We only care about partition-level conflicts, not file-level conflicts
-    boolean hasPartitionConflict = candidateInstants.stream().anyMatch(currentMarkerDirPath -> {
+    // Active heartbeat instants → partition-level conflict detection
+    boolean hasPartitionConflict = classification.activeHeartbeatInstants.stream().anyMatch(currentMarkerDirPath -> {
       try {
         StoragePath markerPartitionPath = new StoragePath(currentMarkerDirPath, partitionPath);
         // If the partition path exists in another instant's marker directory, there's a conflict
@@ -137,11 +135,9 @@ public class PartitionBasedDirectMarkerDetectionStrategy extends DirectMarkerBas
       }
     });
 
-    // Expired heartbeat instants → partition-level conflict detection (reuse same listing)
+    // Expired heartbeat instants → partition-level conflict detection (same classification, zero extra heartbeat IO)
     this.expiredHeartbeatPartitionConflictDetected =
-        MarkerUtils.hasExpiredHeartbeatPartitionConflictFromPaths(
-            storage, allInstantPaths, basePath, instantTime,
-            maxAllowableHeartbeatIntervalInMs, partitionPath);
+        MarkerUtils.hasExpiredHeartbeatInPartition(storage, classification.expiredHeartbeatInstants, partitionPath);
 
     if (hasPartitionConflict) {
       LOG.warn("Detected partition-level marker conflict for partition: " + partitionPath + " at instant " + instantTime);

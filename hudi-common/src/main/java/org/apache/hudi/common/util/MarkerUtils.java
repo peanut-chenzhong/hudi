@@ -43,6 +43,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -319,6 +320,126 @@ public class MarkerUtils {
   }
 
   /**
+   * Result container for classifying instants by heartbeat status in a single pass.
+   */
+  public static class InstantClassification {
+    /** Instants with active (non-expired) heartbeats — suitable for conflict detection. */
+    public final List<String> activeHeartbeatInstants;
+    /** Instants with expired heartbeats — may be "falsely dead" writers still running. */
+    public final List<StoragePath> expiredHeartbeatInstants;
+
+    public InstantClassification(List<String> activeHeartbeatInstants, List<StoragePath> expiredHeartbeatInstants) {
+      this.activeHeartbeatInstants = activeHeartbeatInstants;
+      this.expiredHeartbeatInstants = expiredHeartbeatInstants;
+    }
+  }
+
+  /**
+   * Classifies instant directories from {@code .temp} into two groups in a single pass:
+   * <ul>
+   *   <li><b>Active heartbeat instants</b>: suitable for normal ECD conflict detection</li>
+   *   <li><b>Expired heartbeat instants</b>: may be "falsely dead" writers still running</li>
+   * </ul>
+   *
+   * <p>This avoids calling {@code isHeartbeatExpired} twice per instant (once in
+   * {@link #getCandidateInstants} and once in expired heartbeat checks).
+   *
+   * <p>Filtering rules (same as {@link #getCandidateInstants}):
+   * <ol>
+   *   <li>Skip current writer's own instant ({@code currentInstantTime})</li>
+   *   <li>Skip all instants after {@code currentInstantTime}</li>
+   *   <li>Skip pending compaction / pending replace instants</li>
+   * </ol>
+   *
+   * @param activeTimeline                    Active timeline for filtering pending operations.
+   * @param instants                          All instant directory paths from {@code .temp}.
+   * @param currentInstantTime                Current writer's instant time.
+   * @param maxAllowableHeartbeatIntervalInMs Heartbeat timeout in milliseconds.
+   * @param storage                           {@link HoodieStorage} instance.
+   * @param basePath                          Base path of the table.
+   * @return Classification result with active and expired instant lists.
+   */
+  public static InstantClassification classifyInstantsByHeartbeat(
+      HoodieActiveTimeline activeTimeline,
+      List<StoragePath> instants,
+      String currentInstantTime,
+      long maxAllowableHeartbeatIntervalInMs,
+      HoodieStorage storage,
+      String basePath) {
+
+    List<String> activeHeartbeatInstants = new ArrayList<>();
+    List<StoragePath> expiredHeartbeatInstants = new ArrayList<>();
+
+    for (StoragePath instantPath : instants) {
+      String instantTime = markerDirToInstantTime(instantPath.toString());
+
+      // Skip current instant and instants after current
+      if (instantTime.compareToIgnoreCase(currentInstantTime) >= 0) {
+        continue;
+      }
+      // Skip pending compaction and pending replace instants
+      if (activeTimeline.filterPendingCompactionTimeline().containsInstant(instantTime)
+          || activeTimeline.filterPendingReplaceTimeline().containsInstant(instantTime)) {
+        continue;
+      }
+
+      // Check heartbeat status ONCE per instant
+      boolean expired;
+      try {
+        expired = isHeartbeatExpired(instantTime, maxAllowableHeartbeatIntervalInMs, storage, basePath);
+      } catch (IOException e) {
+        // Can't determine status, treat as inactive (skip)
+        continue;
+      }
+
+      if (!expired) {
+        activeHeartbeatInstants.add(instantPath.toString());
+      } else {
+        expiredHeartbeatInstants.add(instantPath);
+      }
+    }
+
+    return new InstantClassification(activeHeartbeatInstants, expiredHeartbeatInstants);
+  }
+
+  /**
+   * Checks whether any of the given expired-heartbeat instants have marker files
+   * in the specified partition.
+   *
+   * @param storage                 {@link HoodieStorage} instance.
+   * @param expiredHeartbeatInstants Instant paths that have expired heartbeats.
+   * @param partitionPath           Partition path to check for conflicts.
+   * @return {@code true} if an expired-heartbeat writer has markers in the same partition.
+   */
+  public static boolean hasExpiredHeartbeatInPartition(
+      HoodieStorage storage,
+      List<StoragePath> expiredHeartbeatInstants,
+      String partitionPath) {
+    for (StoragePath instantPath : expiredHeartbeatInstants) {
+      StoragePath markerPartitionPath;
+      if (StringUtils.isNullOrEmpty(partitionPath)) {
+        markerPartitionPath = instantPath;
+      } else {
+        markerPartitionPath = new StoragePath(instantPath, partitionPath);
+      }
+
+      try {
+        if (storage.exists(markerPartitionPath)) {
+          String instantTime = markerDirToInstantTime(instantPath.toString());
+          LOG.warn("Detected expired heartbeat writer {} with partition conflict in partition: {}. "
+              + "The writer may be 'falsely dead' and still actively writing. "
+              + "Current writer should rollover to a new log file to avoid potential data corruption.",
+              instantTime, partitionPath);
+          return true;
+        }
+      } catch (IOException e) {
+        LOG.warn("Error checking marker partition path: " + markerPartitionPath, e);
+      }
+    }
+    return false;
+  }
+
+  /**
    * Get fileID from full marker path, for example:
    * 20210623/0/20210825/932a86d9-5c1d-44c7-ac99-cb88b8ef8478-0_85-15-1390_20220620181735781.parquet.marker.MERGE
    *    ==> get 20210623/0/20210825/932a86d9-5c1d-44c7-ac99-cb88b8ef8478-0
@@ -350,9 +471,12 @@ public class MarkerUtils {
    * the caller should rollover to a new log file instead of appending to the existing one,
    * preventing data corruption from concurrent writes to the same log file.
    *
-   * <p>This overload lists the {@code .temp} directory internally. If you already have the
-   * listing result (e.g., from the ECD scan), use
-   * {@link #hasExpiredHeartbeatPartitionConflictFromPaths} to avoid redundant IO.
+   * <p>This method lists the {@code .temp} directory and iterates once to find expired-heartbeat
+   * instants, then checks for partition conflicts. Suitable for Flink or other non-ECD paths
+   * where no pre-listed instant paths are available.
+   *
+   * <p>For ECD paths, use {@link #classifyInstantsByHeartbeat} + {@link #hasExpiredHeartbeatInPartition}
+   * to share the single-pass classification with the active-heartbeat conflict check.
    *
    * @param storage                           {@link HoodieStorage} instance.
    * @param basePath                          Base path of the table.
@@ -374,85 +498,29 @@ public class MarkerUtils {
       if (!storage.exists(tempPath)) {
         return false;
       }
+
       List<StoragePath> allInstantPaths = storage.listDirectEntries(tempPath).stream()
           .map(StoragePathInfo::getPath)
           .collect(Collectors.toList());
-      return hasExpiredHeartbeatPartitionConflictFromPaths(
-          storage, allInstantPaths, basePath, currentInstantTime,
-          maxAllowableHeartbeatIntervalInMs, partitionPath);
-    } catch (IOException e) {
-      LOG.warn("Error checking expired heartbeat partition conflict for partition: " + partitionPath, e);
-      return false;
-    }
-  }
 
-  /**
-   * Checks whether any writer with an expired heartbeat has marker files in the same partition,
-   * using a pre-listed set of instant paths from the {@code .temp} directory.
-   *
-   * <p>This is the optimized version designed to be called from within the ECD scan flow, where
-   * the {@code .temp} directory has already been listed. By reusing the listing, we avoid an
-   * extra IO round-trip.
-   *
-   * @param storage                           {@link HoodieStorage} instance.
-   * @param allInstantPaths                   Pre-listed instant directory paths from {@code .temp}.
-   * @param basePath                          Base path of the table.
-   * @param currentInstantTime                Current writer's instant time.
-   * @param maxAllowableHeartbeatIntervalInMs Heartbeat timeout in milliseconds.
-   * @param partitionPath                     Partition path to check for conflicts.
-   * @return {@code true} if an expired-heartbeat writer has markers in the same partition;
-   *         {@code false} otherwise.
-   */
-  public static boolean hasExpiredHeartbeatPartitionConflictFromPaths(
-      HoodieStorage storage,
-      List<StoragePath> allInstantPaths,
-      String basePath,
-      String currentInstantTime,
-      long maxAllowableHeartbeatIntervalInMs,
-      String partitionPath) {
-    try {
+      // Collect expired-heartbeat instants in a single pass
+      List<StoragePath> expiredInstants = new ArrayList<>();
       for (StoragePath instantPath : allInstantPaths) {
         String instantTime = markerDirToInstantTime(instantPath.toString());
-
-        // Skip current writer's own instant and instants after current
         if (instantTime.compareToIgnoreCase(currentInstantTime) >= 0) {
           continue;
         }
-
-        // Only consider instants with EXPIRED heartbeats
         try {
-          if (!isHeartbeatExpired(instantTime, maxAllowableHeartbeatIntervalInMs, storage, basePath)) {
-            // Heartbeat is still active, skip (handled by normal ECD)
-            continue;
+          if (isHeartbeatExpired(instantTime, maxAllowableHeartbeatIntervalInMs, storage, basePath)) {
+            expiredInstants.add(instantPath);
           }
         } catch (IOException e) {
-          // If we can't determine heartbeat status, skip this instant
-          continue;
-        }
-
-        // Check if this expired-heartbeat instant has markers in the same partition
-        StoragePath markerPartitionPath;
-        if (StringUtils.isNullOrEmpty(partitionPath)) {
-          markerPartitionPath = instantPath;
-        } else {
-          markerPartitionPath = new StoragePath(instantPath, partitionPath);
-        }
-
-        try {
-          if (storage.exists(markerPartitionPath)) {
-            LOG.warn("Detected expired heartbeat writer {} with partition conflict in partition: {}. "
-                + "The writer may be 'falsely dead' and still actively writing. "
-                + "Current writer should rollover to a new log file to avoid potential data corruption.",
-                instantTime, partitionPath);
-            return true;
-          }
-        } catch (IOException e) {
-          LOG.warn("Error checking marker partition path: " + markerPartitionPath, e);
+          // Can't determine status, skip
         }
       }
 
-      return false;
-    } catch (Exception e) {
+      return hasExpiredHeartbeatInPartition(storage, expiredInstants, partitionPath);
+    } catch (IOException e) {
       LOG.warn("Error checking expired heartbeat partition conflict for partition: " + partitionPath, e);
       return false;
     }

@@ -24,6 +24,7 @@
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                        分区级并发早期冲突检测流程                                  │
 │                 PartitionTransactionDirectMarkerBasedDetectionStrategy           │
+│            （含过期心跳分区冲突检测，与活跃心跳检测共享同一次 .temp listing）        │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
                               ┌──────────────────┐
@@ -53,80 +54,104 @@
                    ┌─────────────────┴─────────────────┐
                    │                                   │
                    ▼                                   ▼
-        ┌─────────────────┐                 ┌─────────────────────┐
-        │   目录已存在     │                 │    目录不存在        │
-        │ (快速路径)       │                 │   (慢速路径)         │
-        └────────┬────────┘                 └──────────┬──────────┘
-                 │                                     │
-                 │                                     ▼
-                 │                     ┌───────────────────────────────┐
-                 │                     │   获取 ZK 分区锁               │
-                 │                     │   Lock Key: partition_lock_   │
-                 │                     │   {partitionPath}             │
-                 │                     └───────────────┬───────────────┘
-                 │                                     │
-                 │                                     ▼
-                 │                     ╔═══════════════════════════════╗
-                 │                     ║  Double-Check:                 ║
-                 │                     ║  分区目录是否存在？            ║
-                 │                     ║  【持有锁状态下检查】          ║
-                 │                     ╚═══════════════╤═══════════════╝
-                 │                                     │
-                 │                     ┌───────────────┴───────────────┐
-                 │                     │                               │
-                 │                     ▼                               ▼
-                 │          ┌─────────────────┐            ┌──────────────────────┐
-                 │          │   目录已存在     │            │    目录仍不存在       │
-                 │          │(其他task已创建)  │            │   (需要冲突检测)      │
-                 │          └────────┬────────┘            └───────────┬──────────┘
-                 │                   │                                 │
-                 │                   │                                 ▼
-                 │                   │                 ┌────────────────────────────────┐
-                 │                   │                 │  扫描其他 instant 的 marker    │
-                 │                   │                 │  目录，检查是否有同分区写入     │
-                 │                   │                 │  .temp/{otherInstant}/{partition}│
-                 │                   │                 └───────────────┬────────────────┘
-                 │                   │                                 │
-                 │                   │                   ┌─────────────┴─────────────┐
-                 │                   │                   │                           │
-                 │                   │                   ▼                           ▼
-                 │                   │        ┌─────────────────┐        ┌───────────────────┐
-                 │                   │        │  检测到冲突！    │        │   无冲突          │
-                 │                   │        │ (其他instant     │        │                   │
-                 │                   │        │  在写同一分区)   │        └─────────┬─────────┘
-                 │                   │        └────────┬────────┘                  │
-                 │                   │                 │                           ▼
-                 │                   │                 │           ┌──────────────────────────┐
-                 │                   │                 │           │  创建分区目录             │
-                 │                   │                 │           │  .temp/{instant}/{part}/ │
-                 │                   │                 │           │  作为"占位符"             │
-                 │                   │                 │           └────────────┬─────────────┘
-                 │                   │                 │                        │
-                 │                   │                 ▼                        ▼
-                 │                   │    ┌───────────────────┐    ┌───────────────────┐
-                 │                   │    │  释放锁            │    │   释放锁           │
-                 │                   │    │  抛出冲突异常      │    └─────────┬─────────┘
-                 │                   │    │  任务失败重试      │              │
-                 │                   │    └───────────────────┘              │
-                 │                   │                                       │
-                 │                   ▼                                       │
-                 │      ┌───────────────────┐                                │
-                 │      │    释放锁          │                                │
-                 │      └─────────┬─────────┘                                │
-                 │                │                                          │
-                 └────────────────┼──────────────────────────────────────────┘
-                                  │
-                                  ▼
-                    ┌─────────────────────────────────┐
-                    │  DirectWriteMarkers.create()    │
-                    │  创建实际的 marker 文件          │
-                    │  {file}.marker.{IOType}         │
-                    └───────────────┬─────────────────┘
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │    开始写数据文件    │
-                         └─────────────────────┘
+        ┌─────────────────────┐              ┌─────────────────────┐
+        │   目录已存在         │              │    目录不存在        │
+        │ (快速路径)           │              │   (慢速路径)         │
+        │                     │              └──────────┬──────────┘
+        │  仍需检查过期心跳：  │                         │
+        │  hasExpiredHeartbeat │                         ▼
+        │  PartitionConflict  │      ┌───────────────────────────────┐
+        │  (独立 list .temp)  │      │   获取 ZK 分区锁               │
+        │                     │      │   Lock Key: partition_lock_   │
+        │  结果 → 存入标志位   │      │   {partitionPath}             │
+        └────────┬────────────┘      └───────────────┬───────────────┘
+                 │                                   │
+                 │                                   ▼
+                 │                   ╔═══════════════════════════════╗
+                 │                   ║  Double-Check:                 ║
+                 │                   ║  分区目录是否存在？            ║
+                 │                   ║  【持有锁状态下检查】          ║
+                 │                   ╚═══════════════╤═══════════════╝
+                 │                                   │
+                 │                   ┌───────────────┴───────────────┐
+                 │                   │                               │
+                 │                   ▼                               ▼
+                 │        ┌─────────────────┐            ┌──────────────────────┐
+                 │        │   目录已存在     │            │    目录仍不存在       │
+                 │        │(其他task已创建)  │            │   (需要冲突检测)      │
+                 │        └────────┬────────┘            └───────────┬──────────┘
+                 │                 │                                 │
+                 │                 │                                 ▼
+                 │                 │              ┌──────────────────────────────────────┐
+                 │                 │              │  List .temp 目录（仅一次 IO）         │
+                 │                 │              │         │                             │
+                 │                 │              │         ▼                             │
+                 │                 │              │  classifyInstantsByHeartbeat()        │
+                 │                 │              │  单次遍历，每个instant心跳只读一次    │
+                 │                 │              │  ┌────────────┐  ┌────────────────┐  │
+                 │                 │              │  │活跃心跳组   │  │过期心跳组       │  │
+                 │                 │              │  │→分区冲突检测│  │→hasExpiredHB   │  │
+                 │                 │              │  │             │  │ InPartition()  │  │
+                 │                 │              │  └──────┬─────┘  └──────┬─────────┘  │
+                 │                 │              │         │               │             │
+                 │                 │              │         ▼               ▼             │
+                 │                 │              │     有/无冲突      结果→标志位        │
+                 │                 │              └─────────┬───────────────┬─────────────┘
+                 │                 │                        │               │
+                 │                 │            ┌───────────┴──────┐        │
+                 │                 │            │                  │        │
+                 │                 │            ▼                  ▼        │
+                 │                 │  ┌─────────────────┐  ┌────────────┐  │
+                 │                 │  │  检测到冲突！    │  │  无冲突    │  │
+                 │                 │  │ (活跃instant     │  │            │  │
+                 │                 │  │  在写同一分区)   │  └─────┬──────┘  │
+                 │                 │  └────────┬────────┘        │         │
+                 │                 │           │                 ▼         │
+                 │                 │           │    ┌──────────────────┐   │
+                 │                 │           │    │ 创建分区目录      │   │
+                 │                 │           │    │ .temp/{instant}/ │   │
+                 │                 │           │    │ {part}/ 占位符   │   │
+                 │                 │           │    └────────┬─────────┘   │
+                 │                 │           │             │             │
+                 │                 │           ▼             ▼             │
+                 │                 │  ┌────────────────┐  ┌────────────┐  │
+                 │                 │  │ 释放锁          │  │ 释放锁     │  │
+                 │                 │  │ 抛出冲突异常    │  └─────┬──────┘  │
+                 │                 │  │ 任务失败重试    │        │         │
+                 │                 │  └────────────────┘        │         │
+                 │                 │                             │         │
+                 │                 ▼                             │         │
+                 │    ┌───────────────────┐                     │         │
+                 │    │    释放锁          │                     │         │
+                 │    └─────────┬─────────┘                     │         │
+                 │              │                                │         │
+                 └──────────────┼────────────────────────────────┘         │
+                                │                                          │
+                                │◄─────────────────────────────────────────┘
+                                │     (expiredHeartbeatPartitionConflictDetected
+                                │      标志位已在扫描中设置)
+                                ▼
+              ╔══════════════════════════════════════════════════════╗
+              ║  检查过期心跳标志位                                    ║
+              ║  strategy.isExpiredHeartbeatPartitionConflict        ║
+              ║  Detected() == true ?                                ║
+              ╚═══════════════════════╤════════════════════════════╝
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    │                                   │
+                    ▼                                   ▼
+         ┌──────────────────────┐          ┌───────────────────────────┐
+         │  有过期心跳分区冲突   │          │  无过期心跳冲突            │
+         │  return Option.empty │          │                           │
+         │  → rollover 写新文件 │          │  DirectWriteMarkers       │
+         └──────────────────────┘          │  .create() 创建 marker    │
+                                           │  {file}.marker.{IOType}   │
+                                           └─────────────┬─────────────┘
+                                                         │
+                                                         ▼
+                                              ┌─────────────────────┐
+                                              │    开始写数据文件    │
+                                              └─────────────────────┘
 ```
 
 ### Marker 文件目录结构
@@ -248,10 +273,11 @@ createWithEarlyConflictDetection() 调用链:
   ├─ Step 1: strategy.detectAndResolveConflictIfNecessary()
   │   └─ 内部 checkMarkerConflict() / checkPartitionMarkerConflict()
   │       ├─ List .temp 目录（仅一次 IO）
-  │       ├─ 活跃心跳 instant → fileId/partition 冲突检测
-  │       │   └─ 有冲突 → 抛异常
-  │       └─ 过期心跳 instant → 分区冲突检测（复用同一 listing）
-  │           └─ 结果存入 expiredHeartbeatPartitionConflictDetected 标志位
+  │       ├─ classifyInstantsByHeartbeat()  ← 单次遍历，每个心跳只读一次
+  │       │   ├─ 活跃心跳组 → fileId/partition 冲突检测
+  │       │   │   └─ 有冲突 → 抛异常
+  │       │   └─ 过期心跳组 → hasExpiredHeartbeatInPartition()
+  │       │       └─ 结果存入 expiredHeartbeatPartitionConflictDetected 标志位
   │
   ├─ Step 2: 检查标志位
   │   └─ strategy.isExpiredHeartbeatPartitionConflictDetected()
@@ -260,8 +286,10 @@ createWithEarlyConflictDetection() 调用链:
   └─ Step 3: 无冲突 → 创建 marker 文件 → preLogFileOpen 返回 true
 ```
 
-**关键优化点**：`checkMarkerConflict` 只调用一次 `storage.listDirectEntries(.temp)`，
-同时完成活跃心跳和过期心跳两种检测，显著减少 IO 开销。
+**关键优化点**：
+- `checkMarkerConflict` 只调用一次 `storage.listDirectEntries(.temp)`
+- `classifyInstantsByHeartbeat` 单次遍历所有 instant，每个 instant 的心跳文件**只读一次**
+- 分类后活跃组和过期组各自处理，**零重复心跳 IO**
 
 ### Spark 与 Flink 的不同路径
 
@@ -283,24 +311,49 @@ createWithEarlyConflictDetection() 调用链:
 
 ### 核心代码
 
-**DirectMarkerBasedDetectionStrategy.checkMarkerConflict()（复用 listing）**
+**MarkerUtils.classifyInstantsByHeartbeat()（单次遍历分类）**
 
 ```java
-public boolean checkMarkerConflict(String basePath, long maxAllowableHeartbeatIntervalInMs) throws IOException {
-    // List .temp 目录——仅一次 IO，两种检测共享
-    List<StoragePath> allInstantPaths = storage.listDirectEntries(new StoragePath(tempFolderPath))
-        .stream().map(StoragePathInfo::getPath).collect(Collectors.toList());
+// 一次遍历所有 instant，每个 instant 只调用一次 isHeartbeatExpired，
+// 按心跳状态分为活跃/过期两组
+public static InstantClassification classifyInstantsByHeartbeat(
+    HoodieActiveTimeline activeTimeline, List<StoragePath> instants,
+    String currentInstantTime, long maxAllowableHeartbeatIntervalInMs,
+    HoodieStorage storage, String basePath) {
 
-    // 1. 活跃心跳 → fileId 级冲突（原有逻辑）
-    List<String> candidateInstants = MarkerUtils.getCandidateInstants(
-        activeTimeline, allInstantPaths, instantTime, maxAllowableHeartbeatIntervalInMs, storage, basePath);
-    long res = candidateInstants.stream().flatMap(/* fileId 检查 */).count();
+  List<String> activeHeartbeatInstants = new ArrayList<>();
+  List<StoragePath> expiredHeartbeatInstants = new ArrayList<>();
 
-    // 2. 过期心跳 → 分区级冲突（新增，复用同一 listing）
+  for (StoragePath instantPath : instants) {
+    String instantTime = markerDirToInstantTime(instantPath.toString());
+    if (instantTime >= currentInstantTime) continue;             // 跳过当前及之后的
+    if (pendingCompaction/pendingReplace) continue;              // 跳过 compaction/replace
+
+    boolean expired = isHeartbeatExpired(instantTime, ...);      // 每个 instant 只读一次心跳
+    if (!expired) activeHeartbeatInstants.add(instantPath);
+    else          expiredHeartbeatInstants.add(instantPath);
+  }
+  return new InstantClassification(activeHeartbeatInstants, expiredHeartbeatInstants);
+}
+```
+
+**DirectMarkerBasedDetectionStrategy.checkMarkerConflict()（使用分类结果）**
+
+```java
+public boolean checkMarkerConflict(String basePath, long maxAllowableHeartbeatIntervalInMs) {
+    // 1. List .temp 目录（仅一次 IO）
+    List<StoragePath> allInstantPaths = storage.listDirectEntries(.temp);
+
+    // 2. 单次遍历分类（每个 instant 的心跳只读一次）
+    InstantClassification classification = MarkerUtils.classifyInstantsByHeartbeat(
+        activeTimeline, allInstantPaths, instantTime, maxHeartbeat, storage, basePath);
+
+    // 3. 活跃心跳 instant → fileId/partition 冲突检测
+    long res = classification.activeHeartbeatInstants.stream().flatMap(/* 检查 */).count();
+
+    // 4. 过期心跳 instant → 分区冲突检测（零额外心跳 IO）
     this.expiredHeartbeatPartitionConflictDetected =
-        MarkerUtils.hasExpiredHeartbeatPartitionConflictFromPaths(
-            storage, allInstantPaths, basePath, instantTime,
-            maxAllowableHeartbeatIntervalInMs, partitionPath);
+        MarkerUtils.hasExpiredHeartbeatInPartition(storage, classification.expiredHeartbeatInstants, partitionPath);
 
     return res != 0L;
 }
@@ -321,18 +374,14 @@ if (config.isExpiredHeartbeatPartitionConflictCheckEnabled()
 return create(getMarkerPath(partitionPath, dataFileName, type), checkIfExists);
 ```
 
-**MarkerUtils — 两个重载方法**
+**MarkerUtils — ECD 路径 vs Flink 路径**
 
 ```java
-// 方法 1: 自行 list .temp 目录（供 Flink 使用）
-public static boolean hasExpiredHeartbeatPartitionConflict(
-    HoodieStorage storage, String basePath, String currentInstantTime,
-    long maxAllowableHeartbeatIntervalInMs, String partitionPath)
+// ECD 路径（Spark）：使用 classifyInstantsByHeartbeat + hasExpiredHeartbeatInPartition
+//   → 与活跃心跳检测共享单次遍历，每个 instant 心跳只读一次
 
-// 方法 2: 接受预列路径（供 ECD 扫描点使用，零额外 IO）
-public static boolean hasExpiredHeartbeatPartitionConflictFromPaths(
-    HoodieStorage storage, List<StoragePath> allInstantPaths, String basePath,
-    String currentInstantTime, long maxAllowableHeartbeatIntervalInMs, String partitionPath)
+// Flink 路径（独立调用）：hasExpiredHeartbeatPartitionConflict
+//   → 自行 list .temp 并遍历，适用于不走 ECD 的场景
 ```
 
 **FlinkAppendHandle（Flink，独立检测）**
@@ -418,13 +467,20 @@ hoodie.client.heartbeat.tolerable.misses=2          # 容忍 2 次丢失
                 │  ── 仅一次 IO，三层检测共享 ──                  │
                 └───────────────────┬────────────────────────────┘
                                     │
+                                    ▼
+                ┌────────────────────────────────────────────────┐
+                │  classifyInstantsByHeartbeat()                 │
+                │  单次遍历，每个 instant 心跳只读一次            │
+                │  ── 分为活跃组 / 过期组 ──                      │
+                └───────────────────┬────────────────────────────┘
+                                    │
                     ┌───────────────┴───────────────┐
                     │                               │
                     ▼                               ▼
        ┌────────────────────────┐     ┌────────────────────────────┐
        │ 第一层: 活跃心跳冲突    │     │ 第三层: 过期心跳分区冲突     │
-       │ getCandidateInstants   │     │ hasExpiredHeartbeat         │
-       │ → fileId/partition检测 │     │ PartitionConflictFromPaths │
+       │ activeHeartbeatInstants│     │ hasExpiredHeartbeat         │
+       │ → fileId/partition检测 │     │ InPartition()              │
        └──────────┬─────────────┘     └──────────────┬─────────────┘
                   │                                   │
                   ▼                                   ▼
@@ -463,8 +519,9 @@ hoodie.client.heartbeat.tolerable.misses=2          # 容忍 2 次丢失
 | ECD 策略(分区级) | `PartitionBasedDirectMarkerDetectionStrategy` | `checkPartitionMarkerConflict()` |
 | ECD 策略(分区+ZK锁) | `PartitionTransactionDirectMarkerBasedDetectionStrategy` | `detectAndResolveConflictIfNecessary()` |
 | 候选 instant 过滤 | `MarkerUtils` | `getCandidateInstants()` |
-| 过期心跳检测(复用listing) | `MarkerUtils` | `hasExpiredHeartbeatPartitionConflictFromPaths()` |
-| 过期心跳检测(独立) | `MarkerUtils` | `hasExpiredHeartbeatPartitionConflict()` |
+| 单次遍历分类(ECD) | `MarkerUtils` | `classifyInstantsByHeartbeat()` |
+| 过期心跳分区检测(ECD) | `MarkerUtils` | `hasExpiredHeartbeatInPartition()` |
+| 过期心跳分区检测(Flink) | `MarkerUtils` | `hasExpiredHeartbeatPartitionConflict()` |
 | 过期心跳标志位 | `DirectMarkerBasedDetectionStrategy` | `isExpiredHeartbeatPartitionConflictDetected()` |
 | Spark preLogFileOpen | `HoodieWriteHandle.AppendLogWriteCallback` | `preLogFileOpen()` → `createAppendMarker()` |
 | Flink preLogFileOpen | `FlinkAppendHandle` (匿名内部类) | `preLogFileOpen()` |
