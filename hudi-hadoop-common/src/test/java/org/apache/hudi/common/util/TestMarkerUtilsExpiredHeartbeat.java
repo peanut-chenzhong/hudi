@@ -164,21 +164,24 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
   @Test
   public void testConflict_MultipleInstants() throws IOException {
     // Multiple instants:
-    // - 001: active heartbeat, same partition (should be skipped)
-    // - 0001: expired heartbeat, different partition (should be skipped)
+    // - 001: active heartbeat, same partition (should be skipped — heartbeat just created)
+    // - 0001: expired heartbeat, different partition (should be skipped — different partition)
     // - 00001: expired heartbeat, same partition (should trigger conflict)
     createMarkerDir("001", "2023/01/01");
-    createHeartbeat("001");
+    createHeartbeat("001"); // Heartbeat is fresh (just created, age ≈ 0ms)
 
     createMarkerDir("0001", "2023/01/02");
-    // No heartbeat for 0001 → expired
+    // No heartbeat for 0001 → lastHeartbeatTime = 0 → age = currentTimeMillis() → expired
 
     createMarkerDir("00001", "2023/01/01");
-    // No heartbeat for 00001 → expired
+    // No heartbeat for 00001 → lastHeartbeatTime = 0 → age = currentTimeMillis() → expired
 
-    // Active heartbeat with large timeout → only check expired
+    // Use a reasonable timeout (2 minutes):
+    // - 001's heartbeat was just created → age ≈ 0ms < 120000 → NOT expired (active)
+    // - 0001/00001 have no heartbeat → age = currentTimeMillis() ≈ 1.7e12 > 120000 → expired
+    long twoMinutesMs = 120_000L;
     assertTrue(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", Long.MAX_VALUE, "2023/01/01"),
+        storage, basePath, "002", twoMinutesMs, "2023/01/01"),
         "Should detect conflict from expired heartbeat instant 00001 in same partition");
   }
 
@@ -267,13 +270,18 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
   public void testClassify_ConsistentWithOriginal() throws IOException {
     // Setup complex scenario
     createMarkerDir("001", "2023/01/01");
-    createHeartbeat("001");
+    createHeartbeat("001"); // Fresh heartbeat → age ≈ 0ms → NOT expired with 2min timeout
     createMarkerDir("0001", "2023/01/02");
+    // No heartbeat → expired (different partition, so no conflict for "2023/01/01")
     createMarkerDir("00001", "2023/01/01");
+    // No heartbeat → expired (same partition → conflict!)
 
-    // Original method should detect conflict (00001 is expired, same partition)
+    // Use 2-minute timeout:
+    // - 001 has fresh heartbeat → NOT expired
+    // - 0001/00001 have no heartbeat → expired
+    long twoMinutesMs = 120_000L;
     boolean resultOriginal = MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", Long.MAX_VALUE, "2023/01/01");
+        storage, basePath, "002", twoMinutesMs, "2023/01/01");
     assertTrue(resultOriginal, "Should detect conflict from expired instant 00001");
   }
 }
