@@ -26,14 +26,15 @@ import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.util.MarkerUtils;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.exception.HoodieIOException;
-import org.apache.hudi.storage.StoragePathInfo;
-import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.HoodieStorage;
+import org.apache.hudi.storage.StoragePath;
+import org.apache.hudi.storage.StoragePathInfo;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -53,6 +54,13 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
   protected final HoodieActiveTimeline activeTimeline;
   protected final HoodieConfig config;
 
+  /**
+   * Flag indicating whether an expired-heartbeat writer has marker files in the same partition.
+   * Set during {@link #checkMarkerConflict(String, long)} alongside the normal fileId-level
+   * conflict check, reusing the same {@code .temp} directory listing to avoid redundant IO.
+   */
+  protected boolean expiredHeartbeatPartitionConflictDetected = false;
+
   public DirectMarkerBasedDetectionStrategy(HoodieStorage storage, String partitionPath, String fileId,
                                             String instantTime,
                                             HoodieActiveTimeline activeTimeline, HoodieConfig config) {
@@ -65,10 +73,28 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
   }
 
   /**
+   * Returns whether an expired-heartbeat writer was detected with marker files in the same partition
+   * during the last call to {@link #checkMarkerConflict(String, long)}.
+   *
+   * <p>This flag is set as a side-effect of the conflict check, reusing the same {@code .temp}
+   * directory listing. The caller (e.g., {@code DirectWriteMarkers.createWithEarlyConflictDetection})
+   * can use this to decide whether to trigger a log file rollover.
+   *
+   * @return {@code true} if an expired-heartbeat partition conflict was detected.
+   */
+  public boolean isExpiredHeartbeatPartitionConflictDetected() {
+    return expiredHeartbeatPartitionConflictDetected;
+  }
+
+  /**
    * We need to do list operation here.
    * In order to reduce the list pressure as much as possible, first we build path prefix in advance:
    * '$base_path/.temp/instant_time/partition_path', and only list these specific partition_paths
    * we need instead of list all the '$base_path/.temp/'
+   *
+   * <p>This method also computes the expired heartbeat partition conflict as a side-effect,
+   * reusing the same {@code .temp} directory listing. The result can be read via
+   * {@link #isExpiredHeartbeatPartitionConflictDetected()}.
    *
    * @param basePath                          Base path of the table.
    * @param maxAllowableHeartbeatIntervalInMs Heartbeat timeout.
@@ -78,10 +104,19 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
   public boolean checkMarkerConflict(String basePath, long maxAllowableHeartbeatIntervalInMs) throws IOException {
     String tempFolderPath = basePath + StoragePath.SEPARATOR + HoodieTableMetaClient.TEMPFOLDER_NAME;
 
+    // List .temp directory ONCE, reuse for both active-heartbeat and expired-heartbeat checks
+    List<StoragePath> allInstantPaths;
+    try {
+      allInstantPaths = storage.listDirectEntries(new StoragePath(tempFolderPath)).stream()
+          .map(StoragePathInfo::getPath)
+          .collect(Collectors.toList());
+    } catch (IOException e) {
+      allInstantPaths = Collections.emptyList();
+    }
+
+    // Active heartbeat instants → fileId-level conflict detection (original logic)
     List<String> candidateInstants = MarkerUtils.getCandidateInstants(activeTimeline,
-        storage.listDirectEntries(new StoragePath(tempFolderPath)).stream()
-            .map(StoragePathInfo::getPath)
-            .collect(Collectors.toList()),
+        allInstantPaths,
         instantTime, maxAllowableHeartbeatIntervalInMs, storage,
         basePath);
 
@@ -104,6 +139,12 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
         throw new HoodieIOException("IOException occurs during checking marker file conflict");
       }
     }).count();
+
+    // Expired heartbeat instants → partition-level conflict detection (reuse same listing)
+    this.expiredHeartbeatPartitionConflictDetected =
+        MarkerUtils.hasExpiredHeartbeatPartitionConflictFromPaths(
+            storage, allInstantPaths, basePath, instantTime,
+            maxAllowableHeartbeatIntervalInMs, partitionPath);
 
     if (res != 0L) {
       LOG.warn("Detected conflict marker files: " + partitionPath + "/" + fileId + " for " + instantTime);

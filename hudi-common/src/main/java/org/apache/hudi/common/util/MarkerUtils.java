@@ -350,6 +350,10 @@ public class MarkerUtils {
    * the caller should rollover to a new log file instead of appending to the existing one,
    * preventing data corruption from concurrent writes to the same log file.
    *
+   * <p>This overload lists the {@code .temp} directory internally. If you already have the
+   * listing result (e.g., from the ECD scan), use
+   * {@link #hasExpiredHeartbeatPartitionConflictFromPaths} to avoid redundant IO.
+   *
    * @param storage                           {@link HoodieStorage} instance.
    * @param basePath                          Base path of the table.
    * @param currentInstantTime                Current writer's instant time.
@@ -370,14 +374,45 @@ public class MarkerUtils {
       if (!storage.exists(tempPath)) {
         return false;
       }
+      List<StoragePath> allInstantPaths = storage.listDirectEntries(tempPath).stream()
+          .map(StoragePathInfo::getPath)
+          .collect(Collectors.toList());
+      return hasExpiredHeartbeatPartitionConflictFromPaths(
+          storage, allInstantPaths, basePath, currentInstantTime,
+          maxAllowableHeartbeatIntervalInMs, partitionPath);
+    } catch (IOException e) {
+      LOG.warn("Error checking expired heartbeat partition conflict for partition: " + partitionPath, e);
+      return false;
+    }
+  }
 
-      List<StoragePathInfo> instantDirs = storage.listDirectEntries(tempPath);
-
-      for (StoragePathInfo instantDir : instantDirs) {
-        if (!instantDir.isDirectory()) {
-          continue;
-        }
-        String instantTime = markerDirToInstantTime(instantDir.getPath().toString());
+  /**
+   * Checks whether any writer with an expired heartbeat has marker files in the same partition,
+   * using a pre-listed set of instant paths from the {@code .temp} directory.
+   *
+   * <p>This is the optimized version designed to be called from within the ECD scan flow, where
+   * the {@code .temp} directory has already been listed. By reusing the listing, we avoid an
+   * extra IO round-trip.
+   *
+   * @param storage                           {@link HoodieStorage} instance.
+   * @param allInstantPaths                   Pre-listed instant directory paths from {@code .temp}.
+   * @param basePath                          Base path of the table.
+   * @param currentInstantTime                Current writer's instant time.
+   * @param maxAllowableHeartbeatIntervalInMs Heartbeat timeout in milliseconds.
+   * @param partitionPath                     Partition path to check for conflicts.
+   * @return {@code true} if an expired-heartbeat writer has markers in the same partition;
+   *         {@code false} otherwise.
+   */
+  public static boolean hasExpiredHeartbeatPartitionConflictFromPaths(
+      HoodieStorage storage,
+      List<StoragePath> allInstantPaths,
+      String basePath,
+      String currentInstantTime,
+      long maxAllowableHeartbeatIntervalInMs,
+      String partitionPath) {
+    try {
+      for (StoragePath instantPath : allInstantPaths) {
+        String instantTime = markerDirToInstantTime(instantPath.toString());
 
         // Skip current writer's own instant and instants after current
         if (instantTime.compareToIgnoreCase(currentInstantTime) >= 0) {
@@ -398,22 +433,26 @@ public class MarkerUtils {
         // Check if this expired-heartbeat instant has markers in the same partition
         StoragePath markerPartitionPath;
         if (StringUtils.isNullOrEmpty(partitionPath)) {
-          markerPartitionPath = instantDir.getPath();
+          markerPartitionPath = instantPath;
         } else {
-          markerPartitionPath = new StoragePath(instantDir.getPath(), partitionPath);
+          markerPartitionPath = new StoragePath(instantPath, partitionPath);
         }
 
-        if (storage.exists(markerPartitionPath)) {
-          LOG.warn("Detected expired heartbeat writer {} with partition conflict in partition: {}. "
-              + "The writer may be 'falsely dead' and still actively writing. "
-              + "Current writer should rollover to a new log file to avoid potential data corruption.",
-              instantTime, partitionPath);
-          return true;
+        try {
+          if (storage.exists(markerPartitionPath)) {
+            LOG.warn("Detected expired heartbeat writer {} with partition conflict in partition: {}. "
+                + "The writer may be 'falsely dead' and still actively writing. "
+                + "Current writer should rollover to a new log file to avoid potential data corruption.",
+                instantTime, partitionPath);
+            return true;
+          }
+        } catch (IOException e) {
+          LOG.warn("Error checking marker partition path: " + markerPartitionPath, e);
         }
       }
 
       return false;
-    } catch (IOException e) {
+    } catch (Exception e) {
       LOG.warn("Error checking expired heartbeat partition conflict for partition: " + partitionPath, e);
       return false;
     }

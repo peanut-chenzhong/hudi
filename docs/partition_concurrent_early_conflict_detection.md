@@ -237,95 +237,126 @@ Writer B:  开始写入同一分区
            Writer B 追加到与 Writer A 相同的 log 文件 → 数据损坏！
 ```
 
-### 解决方案
+### 解决方案：集成到 ECD 扫描点
 
-在 `preLogFileOpen` 回调中增加第三层保护：即使 instant 的心跳已超时，
-只要它在**同一分区**存在 marker 文件，就触发 rollover 写新文件。
+过期心跳检测**直接集成到 ECD 的 `.temp` 目录扫描流程中**，
+与活跃心跳冲突检测复用同一次 `listDirectEntries` 调用，避免重复 IO。
 
 ```
-preLogFileOpen(logFile) 调用链:
+createWithEarlyConflictDetection() 调用链:
   │
-  ├─ Step 1: Marker 文件保护（已有）
-  │   └─ marker 创建失败 → return false → rollover
+  ├─ Step 1: strategy.detectAndResolveConflictIfNecessary()
+  │   └─ 内部 checkMarkerConflict() / checkPartitionMarkerConflict()
+  │       ├─ List .temp 目录（仅一次 IO）
+  │       ├─ 活跃心跳 instant → fileId/partition 冲突检测
+  │       │   └─ 有冲突 → 抛异常
+  │       └─ 过期心跳 instant → 分区冲突检测（复用同一 listing）
+  │           └─ 结果存入 expiredHeartbeatPartitionConflictDetected 标志位
   │
-  ├─ Step 2: 过期心跳分区冲突检测（新增）
-  │   ├─ 遍历 .temp 下所有 instant marker 目录
-  │   ├─ 跳过当前 instant 及之后的 instant
-  │   ├─ 筛选心跳已超时的 instant
-  │   ├─ 检查该 instant 是否在同一分区有 marker
-  │   └─ 有冲突 → return false → rollover 到新 log 文件
+  ├─ Step 2: 检查标志位
+  │   └─ strategy.isExpiredHeartbeatPartitionConflictDetected()
+  │       └─ true → 返回 Option.empty() → preLogFileOpen 返回 false → rollover
   │
-  └─ 无冲突 → return true → 追加到现有文件
+  └─ Step 3: 无冲突 → 创建 marker 文件 → preLogFileOpen 返回 true
 ```
+
+**关键优化点**：`checkMarkerConflict` 只调用一次 `storage.listDirectEntries(.temp)`，
+同时完成活跃心跳和过期心跳两种检测，显著减少 IO 开销。
+
+### Spark 与 Flink 的不同路径
+
+| 引擎 | 过期心跳检测位置 | 原因 |
+|------|----------------|------|
+| **Spark** | `DirectWriteMarkers.createWithEarlyConflictDetection()` | Spark 走 ECD 流程，复用 `.temp` listing |
+| **Flink** | `FlinkAppendHandle.preLogFileOpen()` | Flink 不走 ECD，需要独立检测 |
 
 ### 与现有 ECD 的关系
 
-| 维度 | 现有 ECD | 过期心跳分区冲突检测 |
+| 维度 | 现有 ECD（活跃心跳） | 过期心跳分区冲突检测 |
 |------|---------|-------------------|
 | 检测对象 | 心跳**未**超时的 instant | 心跳**已**超时的 instant |
-| 检测粒度 | 文件级（fileId） | 分区级（partitionPath） |
-| 冲突处理 | **抛异常**，写入失败 | **返回 false**，rollover 写新文件 |
-| 触发点 | `detectAndResolveConflictIfNecessary()` | `preLogFileOpen()` 回调 |
+| 检测粒度 | 文件级（fileId）/ 分区级 | 分区级（partitionPath） |
+| 冲突处理 | **抛异常**，写入失败 | **返回 empty**，rollover 写新文件 |
+| 执行位置 | `detectAndResolveConflictIfNecessary()` | 同一方法内（共享 `.temp` listing） |
+| IO 开销 | 共享 list | **零额外 list**（复用） |
 | 配置开关 | `early.conflict.detection.enable` | `expired.heartbeat.partition.conflict.check.enable` |
 
 ### 核心代码
 
-**MarkerUtils.hasExpiredHeartbeatPartitionConflict()**
+**DirectMarkerBasedDetectionStrategy.checkMarkerConflict()（复用 listing）**
 
 ```java
+public boolean checkMarkerConflict(String basePath, long maxAllowableHeartbeatIntervalInMs) throws IOException {
+    // List .temp 目录——仅一次 IO，两种检测共享
+    List<StoragePath> allInstantPaths = storage.listDirectEntries(new StoragePath(tempFolderPath))
+        .stream().map(StoragePathInfo::getPath).collect(Collectors.toList());
+
+    // 1. 活跃心跳 → fileId 级冲突（原有逻辑）
+    List<String> candidateInstants = MarkerUtils.getCandidateInstants(
+        activeTimeline, allInstantPaths, instantTime, maxAllowableHeartbeatIntervalInMs, storage, basePath);
+    long res = candidateInstants.stream().flatMap(/* fileId 检查 */).count();
+
+    // 2. 过期心跳 → 分区级冲突（新增，复用同一 listing）
+    this.expiredHeartbeatPartitionConflictDetected =
+        MarkerUtils.hasExpiredHeartbeatPartitionConflictFromPaths(
+            storage, allInstantPaths, basePath, instantTime,
+            maxAllowableHeartbeatIntervalInMs, partitionPath);
+
+    return res != 0L;
+}
+```
+
+**DirectWriteMarkers.createWithEarlyConflictDetection()（读取标志位）**
+
+```java
+strategy.detectAndResolveConflictIfNecessary();
+
+// ECD 通过 → 检查过期心跳标志位
+if (config.isExpiredHeartbeatPartitionConflictCheckEnabled()
+    && strategy.isExpiredHeartbeatPartitionConflictDetected()) {
+    LOG.warn("Expired heartbeat partition conflict detected, returning empty to trigger rollover.");
+    return Option.empty();  // → preLogFileOpen 返回 false → rollover
+}
+
+return create(getMarkerPath(partitionPath, dataFileName, type), checkIfExists);
+```
+
+**MarkerUtils — 两个重载方法**
+
+```java
+// 方法 1: 自行 list .temp 目录（供 Flink 使用）
 public static boolean hasExpiredHeartbeatPartitionConflict(
-    HoodieStorage storage, String basePath,
-    String currentInstantTime, long maxAllowableHeartbeatIntervalInMs,
-    String partitionPath) {
+    HoodieStorage storage, String basePath, String currentInstantTime,
+    long maxAllowableHeartbeatIntervalInMs, String partitionPath)
 
-  // 1. 遍历 .temp 下所有 instant 目录
-  List<StoragePathInfo> instantDirs = storage.listDirectEntries(tempPath);
-
-  for (StoragePathInfo instantDir : instantDirs) {
-    String instantTime = markerDirToInstantTime(instantDir.getPath());
-
-    // 2. 跳过当前 instant 及之后的
-    if (instantTime >= currentInstantTime) continue;
-
-    // 3. 只关注心跳已超时的 instant
-    if (!isHeartbeatExpired(instantTime, ...)) continue;
-
-    // 4. 检查该 instant 是否在同一分区有 marker
-    StoragePath markerPartitionPath = new StoragePath(instantDir.getPath(), partitionPath);
-    if (storage.exists(markerPartitionPath)) {
-      LOG.warn("Detected expired heartbeat writer {} in partition: {}", instantTime, partitionPath);
-      return true;  // 触发 rollover
-    }
-  }
-  return false;
-}
+// 方法 2: 接受预列路径（供 ECD 扫描点使用，零额外 IO）
+public static boolean hasExpiredHeartbeatPartitionConflictFromPaths(
+    HoodieStorage storage, List<StoragePath> allInstantPaths, String basePath,
+    String currentInstantTime, long maxAllowableHeartbeatIntervalInMs, String partitionPath)
 ```
 
-**HoodieWriteHandle.AppendLogWriteCallback（Spark）**
+**FlinkAppendHandle（Flink，独立检测）**
 
-```java
-public boolean preLogFileOpen(HoodieLogFile logFileToAppend) {
-    boolean markerCreated = createAppendMarker(logFileToAppend);
-    if (!markerCreated) return false;  // Step 1: marker 保护
-
-    // Step 2: 过期心跳分区冲突检测
-    if (config.isExpiredHeartbeatPartitionConflictCheckEnabled()) {
-        if (MarkerUtils.hasExpiredHeartbeatPartitionConflict(...)) {
-            return false;  // rollover 到新 log 文件
-        }
-    }
-    return true;
-}
-```
-
-**FlinkAppendHandle（Flink）**
-
-在所有返回 `true` 的路径上，统一调用 `hasExpiredHeartbeatPartitionConflict()` 检测：
+Flink 不走 ECD 流程，在 `preLogFileOpen` 中独立调用原始方法：
 
 ```java
 // createdMarkers.contains(markerKey) → return !hasExpiredHeartbeatPartitionConflict();
 // result.isPresent()                 → return !hasExpiredHeartbeatPartitionConflict();
 // 兼容模式                            → return !hasExpiredHeartbeatPartitionConflict();
+```
+
+### PartitionTransactionDirectMarkerBasedDetectionStrategy 的特殊处理
+
+```
+detectAndResolveConflictIfNecessary():
+  │
+  ├─ Fast path (分区目录已存在，跳过 ZK 锁)
+  │   └─ 仍然独立检查过期心跳 (hasExpiredHeartbeatPartitionConflict)
+  │      因为条件可能在首次检查后发生变化
+  │
+  └─ Slow path (需要获取 ZK 锁)
+      └─ 调用 super.detectAndResolveConflictIfNecessary()
+         └─ checkPartitionMarkerConflict() 中已复用 listing 做过期心跳检测
 ```
 
 ### HoodieLogFormatWriter 中的 rollover 行为
@@ -373,45 +404,52 @@ hoodie.client.heartbeat.tolerable.misses=2          # 容忍 2 次丢失
 
 ## 五、三层保护机制总览
 
+三层检测在 `createWithEarlyConflictDetection` 的**同一个调用**中完成，共享 `.temp` listing：
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         Writer 尝试追加 log 文件                         │
-└─────────────────────────────┬───────────────────────────────────────────┘
-                              │
-                              ▼
-              ┌───────────────────────────────────┐
-              │  第一层：ECD 冲突检测               │
-              │  (createWithEarlyConflictDetection) │
-              │  检查活跃 writer 的 fileId 冲突     │
-              ├───────────────────────────────────┤
-              │  冲突 → 抛 HoodieEarlyConflict     │
-              │         DetectionException         │
-              │  无冲突 → 继续                      │
-              └───────────────┬───────────────────┘
-                              │
-                              ▼
-              ┌───────────────────────────────────┐
-              │  第二层：Marker 文件保护            │
-              │  (createIfNotExists)               │
-              │  检查 task retry 冲突              │
-              ├───────────────────────────────────┤
-              │  marker 已存在 → return false      │
-              │                  → rollover        │
-              │  marker 创建成功 → 继续             │
-              └───────────────┬───────────────────┘
-                              │
-                              ▼
-              ┌───────────────────────────────────┐
-              │  第三层：过期心跳分区冲突检测        │
-              │  (hasExpiredHeartbeatPartition     │
-              │   Conflict)                        │
-              │  检查"假死" writer 的分区冲突       │
-              ├───────────────────────────────────┤
-              │  有冲突 → return false              │
-              │           → rollover 到新文件       │
-              │  无冲突 → return true               │
-              │           → 追加到现有文件          │
-              └───────────────────────────────────┘
+│              createWithEarlyConflictDetection() 完整流程                │
+│                     (preLogFileOpen → createAppendMarker 触发)          │
+└─────────────────────────────────┬───────────────────────────────────────┘
+                                  │
+                                  ▼
+                ┌────────────────────────────────────────────────┐
+                │  storage.listDirectEntries(.temp)              │
+                │  ── 仅一次 IO，三层检测共享 ──                  │
+                └───────────────────┬────────────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+       ┌────────────────────────┐     ┌────────────────────────────┐
+       │ 第一层: 活跃心跳冲突    │     │ 第三层: 过期心跳分区冲突     │
+       │ getCandidateInstants   │     │ hasExpiredHeartbeat         │
+       │ → fileId/partition检测 │     │ PartitionConflictFromPaths │
+       └──────────┬─────────────┘     └──────────────┬─────────────┘
+                  │                                   │
+                  ▼                                   ▼
+          冲突 → 抛异常                      结果 → 存入标志位
+          无冲突 → 继续                  expiredHeartbeatPartition
+                  │                      ConflictDetected
+                  │                                   │
+                  ├───────────────────────────────────┘
+                  │
+                  ▼
+       ┌────────────────────────────────────────────────┐
+       │  检查标志位                                      │
+       │  strategy.isExpiredHeartbeatPartitionConflict   │
+       │  Detected() == true?                            │
+       │  ├─ YES → return Option.empty() → rollover      │
+       │  └─ NO  → 继续                                  │
+       └──────────────────┬─────────────────────────────┘
+                          │
+                          ▼
+       ┌──────────────────────────────────────┐
+       │ 第二层: Marker 文件保护               │
+       │ create(markerPath, checkIfExists)     │
+       │ ├─ marker 已存在 → empty → rollover   │
+       │ └─ marker 创建成功 → path → 追加文件   │
+       └──────────────────────────────────────┘
 ```
 
 ---
@@ -421,10 +459,14 @@ hoodie.client.heartbeat.tolerable.misses=2          # 容忍 2 次丢失
 | 组件 | 文件 | 方法 |
 |------|------|------|
 | ECD 入口 | `DirectWriteMarkers` | `createWithEarlyConflictDetection()` |
-| ECD 策略 | `SimpleDirectMarkerBasedDetectionStrategy` | `detectAndResolveConflictIfNecessary()` |
+| ECD 策略(Simple) | `SimpleDirectMarkerBasedDetectionStrategy` | `detectAndResolveConflictIfNecessary()` |
+| ECD 策略(分区级) | `PartitionBasedDirectMarkerDetectionStrategy` | `checkPartitionMarkerConflict()` |
+| ECD 策略(分区+ZK锁) | `PartitionTransactionDirectMarkerBasedDetectionStrategy` | `detectAndResolveConflictIfNecessary()` |
 | 候选 instant 过滤 | `MarkerUtils` | `getCandidateInstants()` |
-| 过期心跳检测 | `MarkerUtils` | `hasExpiredHeartbeatPartitionConflict()` |
-| Spark preLogFileOpen | `HoodieWriteHandle.AppendLogWriteCallback` | `preLogFileOpen()` |
+| 过期心跳检测(复用listing) | `MarkerUtils` | `hasExpiredHeartbeatPartitionConflictFromPaths()` |
+| 过期心跳检测(独立) | `MarkerUtils` | `hasExpiredHeartbeatPartitionConflict()` |
+| 过期心跳标志位 | `DirectMarkerBasedDetectionStrategy` | `isExpiredHeartbeatPartitionConflictDetected()` |
+| Spark preLogFileOpen | `HoodieWriteHandle.AppendLogWriteCallback` | `preLogFileOpen()` → `createAppendMarker()` |
 | Flink preLogFileOpen | `FlinkAppendHandle` (匿名内部类) | `preLogFileOpen()` |
 | Rollover 执行 | `HoodieLogFormatWriter` | `getOutputStream()` → `rollOver()` |
 | 心跳超时判断 | `HoodieHeartbeatUtils` | `isHeartbeatExpired()` |

@@ -240,6 +240,17 @@ public class DirectWriteMarkers extends WriteMarkers {
             storage, partitionPath, fileId, instantTime, activeTimeline, config);
 
     strategy.detectAndResolveConflictIfNecessary();
+
+    // After normal ECD passes (no active-heartbeat conflict), check if an expired-heartbeat
+    // writer has markers in the same partition. If so, return empty to trigger log file rollover,
+    // preventing potential data corruption from a "falsely dead" writer.
+    if (config.isExpiredHeartbeatPartitionConflictCheckEnabled()
+        && strategy.isExpiredHeartbeatPartitionConflictDetected()) {
+      LOG.warn("Expired heartbeat partition conflict detected for partition {} at instant {}. "
+          + "Returning empty marker to trigger log file rollover.", partitionPath, instantTime);
+      return Option.empty();
+    }
+
     return create(getMarkerPath(partitionPath, dataFileName, type), checkIfExists);
   }
 

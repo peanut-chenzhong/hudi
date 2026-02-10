@@ -34,7 +34,6 @@ import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.log.HoodieLogFileWriteCallback;
 import org.apache.hudi.common.table.log.HoodieLogFormat;
 import org.apache.hudi.common.util.HoodieTimer;
-import org.apache.hudi.common.util.MarkerUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 import org.apache.hudi.config.HoodieWriteConfig;
@@ -299,32 +298,12 @@ public abstract class HoodieWriteHandle<T, I, K, O> extends HoodieIOHandle<T, I,
     public boolean preLogFileOpen(HoodieLogFile logFileToAppend) {
       // Try to create marker file. If marker already exists (another task/attempt is writing),
       // this returns false, triggering rollover to a new file.
-      boolean markerCreated = createAppendMarker(logFileToAppend);
-      if (!markerCreated) {
-        return false;
-      }
-
-      // Check for expired heartbeat partition conflict:
-      // If a writer with expired heartbeat has markers in the same partition,
-      // it might be "falsely dead" (heartbeat expired but task still running).
-      // In this case, rollover to a new log file to avoid potential data corruption.
-      if (config.isExpiredHeartbeatPartitionConflictCheckEnabled()) {
-        long maxAllowableHeartbeatIntervalInMs = config.getHoodieClientHeartbeatIntervalInMs()
-            * config.getHoodieClientHeartbeatTolerableMisses();
-        if (MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-            hoodieTable.getStorage(),
-            config.getBasePath(),
-            instantTime,
-            maxAllowableHeartbeatIntervalInMs,
-            partitionPath)) {
-          LOG.warn("Detected expired heartbeat partition conflict for partition: {}. "
-              + "Rolling over to a new log file to prevent potential data corruption "
-              + "from a 'falsely dead' writer.", partitionPath);
-          return false;
-        }
-      }
-
-      return true;
+      //
+      // When ECD is enabled, createAppendMarker internally calls createWithEarlyConflictDetection,
+      // which also checks for expired heartbeat partition conflicts as part of the same .temp
+      // directory scan. If such a conflict is detected, the marker creation returns empty (false),
+      // naturally triggering rollover — no separate check needed here.
+      return createAppendMarker(logFileToAppend);
     }
 
     @Override

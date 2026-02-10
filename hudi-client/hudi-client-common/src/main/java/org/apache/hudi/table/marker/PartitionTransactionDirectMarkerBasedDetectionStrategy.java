@@ -24,6 +24,7 @@ import org.apache.hudi.common.config.LockConfiguration;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
+import org.apache.hudi.common.util.MarkerUtils;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieEarlyConflictDetectionException;
 import org.apache.hudi.exception.HoodieIOException;
@@ -109,6 +110,11 @@ public class PartitionTransactionDirectMarkerBasedDetectionStrategy
    * <p>Lock is only acquired when partition directory doesn't exist yet.
    * If partition directory already exists (created by another task in same instant),
    * we skip lock acquisition entirely.
+   *
+   * <p>In both fast and slow paths, expired heartbeat partition conflicts are checked.
+   * In the fast path, a standalone check is performed (since the .temp listing from the
+   * slow path is not available). In the slow path, the check is performed inside
+   * {@code super.detectAndResolveConflictIfNecessary()} as part of the same scan.
    */
   @Override
   public void detectAndResolveConflictIfNecessary() throws HoodieEarlyConflictDetectionException {
@@ -119,6 +125,14 @@ public class PartitionTransactionDirectMarkerBasedDetectionStrategy
             markerPartitionDirPath, instantTime);
         // Directory exists, meaning another task in the same instant already created it
         // and passed conflict detection. Safe to proceed without lock.
+
+        // Still need to check expired heartbeat partition conflict in the fast path,
+        // because the condition could have changed since the first task's check.
+        if (writeConfig.isExpiredHeartbeatPartitionConflictCheckEnabled()) {
+          this.expiredHeartbeatPartitionConflictDetected =
+              MarkerUtils.hasExpiredHeartbeatPartitionConflict(
+                  storage, basePath, instantTime, maxAllowableHeartbeatIntervalInMs, partitionPath);
+        }
         return;
       }
     } catch (IOException e) {
@@ -127,6 +141,8 @@ public class PartitionTransactionDirectMarkerBasedDetectionStrategy
     }
 
     // Slow path: partition directory doesn't exist, need to acquire lock
+    // The expired heartbeat check is performed inside super.detectAndResolveConflictIfNecessary()
+    // as part of the same .temp directory scan (no extra IO).
     detectConflictAndCreateDirectoryWithLock();
   }
 

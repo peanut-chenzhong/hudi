@@ -58,10 +58,10 @@ import java.util.stream.Stream;
 public class PartitionBasedDirectMarkerDetectionStrategy extends DirectMarkerBasedDetectionStrategy {
 
   private static final Logger LOG = LoggerFactory.getLogger(PartitionBasedDirectMarkerDetectionStrategy.class);
-  private final String basePath;
+  protected final String basePath;
   private final boolean checkCommitConflict;
   private final Set<String> completedCommitInstants;
-  private final long maxAllowableHeartbeatIntervalInMs;
+  protected final long maxAllowableHeartbeatIntervalInMs;
 
   public PartitionBasedDirectMarkerDetectionStrategy(HoodieStorage storage, String partitionPath, String fileId, String instantTime,
                                                   HoodieActiveTimeline activeTimeline, HoodieWriteConfig config) {
@@ -92,6 +92,10 @@ public class PartitionBasedDirectMarkerDetectionStrategy extends DirectMarkerBas
   /**
    * Check for partition-level marker conflicts.
    * Only reports conflicts if another operation is writing to the same partition.
+   *
+   * <p>This method also computes the expired heartbeat partition conflict as a side-effect,
+   * reusing the same {@code .temp} directory listing. The result can be read via
+   * {@link #isExpiredHeartbeatPartitionConflictDetected()}.
    * 
    * @param basePath Base path of the table
    * @param maxAllowableHeartbeatIntervalInMs Maximum allowable heartbeat interval
@@ -101,11 +105,14 @@ public class PartitionBasedDirectMarkerDetectionStrategy extends DirectMarkerBas
   private boolean checkPartitionMarkerConflict(String basePath, long maxAllowableHeartbeatIntervalInMs) throws IOException {
     String tempFolderPath = basePath + StoragePath.SEPARATOR + HoodieTableMetaClient.TEMPFOLDER_NAME;
 
+    // List .temp directory ONCE, reuse for both active-heartbeat and expired-heartbeat checks
+    List<StoragePath> allInstantPaths = storage.listDirectEntries(new StoragePath(tempFolderPath)).stream()
+        .map(StoragePathInfo::getPath)
+        .collect(Collectors.toList());
+
     // Get candidate instants (active, non-expired write operations)
     List<String> candidateInstants = MarkerUtils.getCandidateInstants(activeTimeline,
-        storage.listDirectEntries(new StoragePath(tempFolderPath)).stream()
-            .map(StoragePathInfo::getPath)
-            .collect(Collectors.toList()),
+        allInstantPaths,
         instantTime, maxAllowableHeartbeatIntervalInMs, storage,
         basePath);
 
@@ -129,6 +136,12 @@ public class PartitionBasedDirectMarkerDetectionStrategy extends DirectMarkerBas
         throw new HoodieIOException("IOException occurs during checking partition-level marker conflict", e);
       }
     });
+
+    // Expired heartbeat instants → partition-level conflict detection (reuse same listing)
+    this.expiredHeartbeatPartitionConflictDetected =
+        MarkerUtils.hasExpiredHeartbeatPartitionConflictFromPaths(
+            storage, allInstantPaths, basePath, instantTime,
+            maxAllowableHeartbeatIntervalInMs, partitionPath);
 
     if (hasPartitionConflict) {
       LOG.warn("Detected partition-level marker conflict for partition: " + partitionPath + " at instant " + instantTime);

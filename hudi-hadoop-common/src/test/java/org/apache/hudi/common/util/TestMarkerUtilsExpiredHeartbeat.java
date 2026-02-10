@@ -25,12 +25,18 @@ import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.HoodieStorageUtils;
 import org.apache.hudi.storage.StoragePath;
 
+import org.apache.hudi.storage.StoragePathInfo;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -186,5 +192,74 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
     // For empty partition path, we check the instant marker dir itself
     assertTrue(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
         storage, basePath, "002", 1L, ""));
+  }
+
+  // ====================================================================
+  // Tests for hasExpiredHeartbeatPartitionConflictFromPaths
+  // (the overload that accepts pre-listed instant paths)
+  // ====================================================================
+
+  /**
+   * Helper to get pre-listed instant paths from .temp directory.
+   */
+  private List<StoragePath> listInstantPaths() throws IOException {
+    StoragePath tempPath = new StoragePath(basePath, HoodieTableMetaClient.TEMPFOLDER_NAME);
+    if (!storage.exists(tempPath)) {
+      return Collections.emptyList();
+    }
+    return storage.listDirectEntries(tempPath).stream()
+        .map(StoragePathInfo::getPath)
+        .collect(Collectors.toList());
+  }
+
+  @Test
+  public void testFromPaths_EmptyList() {
+    // Empty pre-listed paths → no conflict
+    assertFalse(MarkerUtils.hasExpiredHeartbeatPartitionConflictFromPaths(
+        storage, Collections.emptyList(), basePath, "002", 60000L, "2023/01/01"));
+  }
+
+  @Test
+  public void testFromPaths_ConflictDetected() throws IOException {
+    // Setup: expired heartbeat instant in same partition
+    createMarkerDir("001", "2023/01/01");
+    // No heartbeat → expired
+
+    List<StoragePath> paths = listInstantPaths();
+    assertTrue(MarkerUtils.hasExpiredHeartbeatPartitionConflictFromPaths(
+        storage, paths, basePath, "002", 1L, "2023/01/01"),
+        "FromPaths should detect conflict same as the original method");
+  }
+
+  @Test
+  public void testFromPaths_NoConflict_ActiveHeartbeat() throws IOException {
+    createMarkerDir("001", "2023/01/01");
+    createHeartbeat("001"); // Fresh heartbeat
+
+    List<StoragePath> paths = listInstantPaths();
+    assertFalse(MarkerUtils.hasExpiredHeartbeatPartitionConflictFromPaths(
+        storage, paths, basePath, "002", Long.MAX_VALUE, "2023/01/01"),
+        "FromPaths should skip active heartbeat instants");
+  }
+
+  @Test
+  public void testFromPaths_ConsistentWithOriginal() throws IOException {
+    // Setup complex scenario: multiple instants with mixed states
+    createMarkerDir("001", "2023/01/01");
+    createHeartbeat("001");
+    createMarkerDir("0001", "2023/01/02");
+    createMarkerDir("00001", "2023/01/01");
+
+    List<StoragePath> paths = listInstantPaths();
+
+    // Both methods should return the same result
+    boolean resultOriginal = MarkerUtils.hasExpiredHeartbeatPartitionConflict(
+        storage, basePath, "002", Long.MAX_VALUE, "2023/01/01");
+    boolean resultFromPaths = MarkerUtils.hasExpiredHeartbeatPartitionConflictFromPaths(
+        storage, paths, basePath, "002", Long.MAX_VALUE, "2023/01/01");
+
+    assertEquals(resultOriginal, resultFromPaths,
+        "Both methods should produce consistent results");
+    assertTrue(resultOriginal, "Should detect conflict from expired instant 00001");
   }
 }
