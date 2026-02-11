@@ -321,11 +321,13 @@ public class OptionsResolver {
   }
 
   /**
-   * Returns whether OCC is enabled.
+   * Returns whether OCC is enabled (including partition-level OCC).
    */
   public static boolean isOptimisticConcurrencyControl(Configuration conf) {
-    return conf.getString(HoodieWriteConfig.WRITE_CONCURRENCY_MODE.key(), HoodieWriteConfig.WRITE_CONCURRENCY_MODE.defaultValue())
-        .equalsIgnoreCase(WriteConcurrencyMode.OPTIMISTIC_CONCURRENCY_CONTROL.name());
+    String modeStr = conf.getString(HoodieWriteConfig.WRITE_CONCURRENCY_MODE.key(),
+        HoodieWriteConfig.WRITE_CONCURRENCY_MODE.defaultValue());
+    WriteConcurrencyMode mode = WriteConcurrencyMode.valueOf(modeStr.toUpperCase());
+    return mode.supportsOptimisticConcurrencyControl();
   }
 
   /**

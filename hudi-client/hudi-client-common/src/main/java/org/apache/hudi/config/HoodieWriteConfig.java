@@ -3226,9 +3226,9 @@ public class HoodieWriteConfig extends HoodieConfig {
 
       // We check if "hoodie.cleaner.policy.failed.writes"
       // is properly set to LAZY for optimistic concurrency control
-      String writeConcurrencyMode = writeConfig.getString(WRITE_CONCURRENCY_MODE);
-      if (WriteConcurrencyMode.OPTIMISTIC_CONCURRENCY_CONTROL.name()
-          .equalsIgnoreCase(writeConcurrencyMode)) {
+      WriteConcurrencyMode concurrencyMode = WriteConcurrencyMode.valueOf(
+          writeConfig.getString(WRITE_CONCURRENCY_MODE).toUpperCase());
+      if (concurrencyMode.supportsOptimisticConcurrencyControl()) {
         // In this case, we assume that the user takes care of setting the lock provider used
         writeConfig.setValue(HoodieCleanConfig.FAILED_WRITES_CLEANER_POLICY.key(),
             HoodieFailedWritesCleaningPolicy.LAZY.name());
@@ -3236,6 +3236,65 @@ public class HoodieWriteConfig extends HoodieConfig {
             HoodieCleanConfig.FAILED_WRITES_CLEANER_POLICY.key(),
             HoodieFailedWritesCleaningPolicy.LAZY.name()));
       }
+
+      // For partition-level concurrency mode, automatically configure all related parameters
+      if (concurrencyMode.isPartitionLevelConcurrency()) {
+        autoAdjustConfigsForPartitionLevelConcurrency();
+      }
+    }
+
+    /**
+     * Auto-configure parameters for partition-level concurrency control.
+     * When OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT is set, this method automatically enables:
+     * <ul>
+     *   <li>Early conflict detection (ECD)</li>
+     *   <li>Partition-transaction-based ECD strategy</li>
+     *   <li>Partition-based conflict resolution strategy</li>
+     *   <li>Expired heartbeat partition conflict check</li>
+     * </ul>
+     */
+    private void autoAdjustConfigsForPartitionLevelConcurrency() {
+      // 1. Enable early conflict detection
+      if (!writeConfig.contains(EARLY_CONFLICT_DETECTION_ENABLE)
+          || !writeConfig.getBoolean(EARLY_CONFLICT_DETECTION_ENABLE)) {
+        writeConfig.setValue(EARLY_CONFLICT_DETECTION_ENABLE, "true");
+        LOG.info(String.format("Automatically set %s=true for partition-level concurrency control",
+            EARLY_CONFLICT_DETECTION_ENABLE.key()));
+      }
+
+      // 2. Set partition-transaction-based ECD strategy
+      String partitionStrategyClass =
+          "org.apache.hudi.table.marker.PartitionTransactionDirectMarkerBasedDetectionStrategy";
+      if (!writeConfig.contains(EARLY_CONFLICT_DETECTION_STRATEGY_CLASS_NAME)
+          || !partitionStrategyClass.equals(writeConfig.getString(EARLY_CONFLICT_DETECTION_STRATEGY_CLASS_NAME))) {
+        writeConfig.setValue(EARLY_CONFLICT_DETECTION_STRATEGY_CLASS_NAME, partitionStrategyClass);
+        LOG.info(String.format("Automatically set %s=%s for partition-level concurrency control",
+            EARLY_CONFLICT_DETECTION_STRATEGY_CLASS_NAME.key(), partitionStrategyClass));
+      }
+
+      // 3. Set partition-based conflict resolution strategy
+      String partitionResolutionClass =
+          "org.apache.hudi.client.transaction.PartitionBasedConcurrentWritesConflictResolutionStrategy";
+      if (!writeConfig.contains(HoodieLockConfig.WRITE_CONFLICT_RESOLUTION_STRATEGY_CLASS_NAME)
+          || !partitionResolutionClass.equals(writeConfig.getString(HoodieLockConfig.WRITE_CONFLICT_RESOLUTION_STRATEGY_CLASS_NAME))) {
+        writeConfig.setValue(HoodieLockConfig.WRITE_CONFLICT_RESOLUTION_STRATEGY_CLASS_NAME.key(),
+            partitionResolutionClass);
+        LOG.info(String.format("Automatically set %s=%s for partition-level concurrency control",
+            HoodieLockConfig.WRITE_CONFLICT_RESOLUTION_STRATEGY_CLASS_NAME.key(), partitionResolutionClass));
+      }
+
+      // 4. Enable expired heartbeat partition conflict check
+      if (!writeConfig.contains(EXPIRED_HEARTBEAT_PARTITION_CONFLICT_CHECK_ENABLE)
+          || !writeConfig.getBoolean(EXPIRED_HEARTBEAT_PARTITION_CONFLICT_CHECK_ENABLE)) {
+        writeConfig.setValue(EXPIRED_HEARTBEAT_PARTITION_CONFLICT_CHECK_ENABLE, "true");
+        LOG.info(String.format("Automatically set %s=true for partition-level concurrency control",
+            EXPIRED_HEARTBEAT_PARTITION_CONFLICT_CHECK_ENABLE.key()));
+      }
+
+      // 5. Set marker type to DIRECT (partition-transaction strategy requires direct markers)
+      writeConfig.setValue(MARKERS_TYPE, MarkerType.DIRECT.name());
+      LOG.info(String.format("Automatically set %s=%s for partition-level concurrency control",
+          MARKERS_TYPE.key(), MarkerType.DIRECT.name()));
     }
 
     private void validate() {
@@ -3243,13 +3302,14 @@ public class HoodieWriteConfig extends HoodieConfig {
       // Ensure Layout Version is good
       new TimelineLayoutVersion(Integer.parseInt(layoutVersion));
       Objects.requireNonNull(writeConfig.getString(BASE_PATH));
+      WriteConcurrencyMode concurrencyMode = WriteConcurrencyMode.valueOf(
+          writeConfig.getString(WRITE_CONCURRENCY_MODE).toUpperCase());
       if (writeConfig.isEarlyConflictDetectionEnable()) {
-        checkArgument(writeConfig.getString(WRITE_CONCURRENCY_MODE)
-                .equalsIgnoreCase(WriteConcurrencyMode.OPTIMISTIC_CONCURRENCY_CONTROL.name()),
-            "To use early conflict detection, set hoodie.write.concurrency.mode=OPTIMISTIC_CONCURRENCY_CONTROL");
+        checkArgument(concurrencyMode.supportsOptimisticConcurrencyControl(),
+            "To use early conflict detection, set hoodie.write.concurrency.mode to "
+                + "OPTIMISTIC_CONCURRENCY_CONTROL or OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT");
       }
-      if (writeConfig.getString(WRITE_CONCURRENCY_MODE)
-          .equalsIgnoreCase(WriteConcurrencyMode.OPTIMISTIC_CONCURRENCY_CONTROL.name())) {
+      if (concurrencyMode.supportsOptimisticConcurrencyControl()) {
         checkArgument(!writeConfig.getString(HoodieCleanConfig.FAILED_WRITES_CLEANER_POLICY)
             .equals(HoodieFailedWritesCleaningPolicy.EAGER.name()), "To enable optimistic concurrency control, set hoodie.cleaner.policy.failed.writes=LAZY");
       }

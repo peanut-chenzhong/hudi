@@ -30,14 +30,30 @@ public enum WriteConcurrencyMode {
   @EnumFieldDescription("Only one active writer to the table. Maximizes throughput.")
   SINGLE_WRITER,
 
-
   // Multiple writer can perform write ops with lazy conflict resolution using locks
   @EnumFieldDescription("Multiple writers can operate on the table with lazy conflict resolution "
       + "using locks. This means that only one writer succeeds if multiple writers write to the "
       + "same file group.")
-  OPTIMISTIC_CONCURRENCY_CONTROL;
+  OPTIMISTIC_CONCURRENCY_CONTROL,
+
+  // Partition-level optimistic concurrency control: multiple writers can write to different
+  // partitions concurrently. Automatically enables partition-based early conflict detection,
+  // partition-level conflict resolution, and expired-heartbeat partition conflict checking.
+  @EnumFieldDescription("Partition-level optimistic concurrency control. Multiple writers can write "
+      + "to different partitions concurrently without conflict. This mode automatically configures: "
+      + "(1) partition-based early conflict detection strategy, "
+      + "(2) partition-level conflict resolution strategy, "
+      + "(3) expired heartbeat partition conflict checking, "
+      + "and (4) LAZY failed writes cleaner policy. "
+      + "Writers targeting the same partition will be detected early and fail fast.")
+  OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT;
 
   public boolean supportsOptimisticConcurrencyControl() {
-    return this == OPTIMISTIC_CONCURRENCY_CONTROL;
+    return this == OPTIMISTIC_CONCURRENCY_CONTROL
+        || this == OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT;
+  }
+
+  public boolean isPartitionLevelConcurrency() {
+    return this == OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT;
   }
 }

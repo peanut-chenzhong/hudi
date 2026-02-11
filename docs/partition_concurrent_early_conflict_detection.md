@@ -467,7 +467,58 @@ hoodie.client.heartbeat.tolerable.misses=2          # 容忍 2 次丢失
 
 ### 5.1 Spark 使用示例
 
-#### 方式一：Spark DataSource API
+#### 方式一：Spark DataSource API（推荐 — 一键模式）
+
+只需设置 `hoodie.write.concurrency.mode=OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT`，
+所有分区级冲突检测参数将**自动配置**：
+
+```scala
+import org.apache.spark.sql.SaveMode
+
+val df = spark.read.parquet("/data/source/user_events_20240115")
+
+df.write.format("hudi")
+  .option("hoodie.table.name", "user_events")
+  .option("hoodie.datasource.write.recordkey.field", "user_id")
+  .option("hoodie.datasource.write.precombine.field", "ts")
+  .option("hoodie.datasource.write.partitionpath.field", "dt")
+  .option("hoodie.datasource.write.table.type", "MERGE_ON_READ")
+
+  // ===== 只需这一个参数即可开启分区级并发控制 =====
+  .option("hoodie.write.concurrency.mode", "OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT")
+
+  // ===== ZooKeeper 分布式锁（仍需手动配置）=====
+  .option("hoodie.write.lock.provider",
+    "org.apache.hudi.client.transaction.lock.ZookeeperBasedLockProvider")
+  .option("hoodie.write.lock.zookeeper.url", "zk1:2181,zk2:2181,zk3:2181")
+  .option("hoodie.write.lock.zookeeper.base_path", "/hudi/locks")
+
+  // 以下参数已自动设置，无需手动指定：
+  // - hoodie.write.concurrency.early.conflict.detection.enable = true
+  // - hoodie.write.concurrency.early.conflict.detection.strategy = PartitionTransactionDirectMarkerBasedDetectionStrategy
+  // - hoodie.write.concurrency.expired.heartbeat.partition.conflict.check.enable = true
+  // - hoodie.cleaner.policy.failed.writes = LAZY
+  // - hoodie.write.lock.conflict.resolution.strategy = PartitionBasedConcurrentWritesConflictResolutionStrategy
+  // - hoodie.write.markers.type = DIRECT
+
+  .mode(SaveMode.Append)
+  .save("/data/hudi/user_events")
+```
+
+> **自动配置列表**：设置 `OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT` 后，以下参数会被自动设置：
+>
+> | 参数 | 自动设置值 |
+> |------|-----------|
+> | `hoodie.write.concurrency.early.conflict.detection.enable` | `true` |
+> | `hoodie.write.concurrency.early.conflict.detection.strategy` | `PartitionTransactionDirectMarkerBasedDetectionStrategy` |
+> | `hoodie.write.lock.conflict.resolution.strategy` | `PartitionBasedConcurrentWritesConflictResolutionStrategy` |
+> | `hoodie.write.concurrency.expired.heartbeat.partition.conflict.check.enable` | `true` |
+> | `hoodie.cleaner.policy.failed.writes` | `LAZY` |
+> | `hoodie.write.markers.type` | `DIRECT` |
+
+#### 方式一（备选）：手动配置模式
+
+如果需要更精细的控制，也可以使用 `OPTIMISTIC_CONCURRENCY_CONTROL` + 手动指定各参数：
 
 ```scala
 import org.apache.spark.sql.SaveMode
@@ -509,7 +560,7 @@ df.write.format("hudi")
 #### 方式二：Spark SQL
 
 ```sql
--- 建表时指定
+-- 建表时指定（一键模式）
 CREATE TABLE hudi_db.user_events (
   user_id STRING,
   event_type STRING,
@@ -522,21 +573,14 @@ TBLPROPERTIES (
   'primaryKey' = 'user_id',
   'preCombineField' = 'ts',
 
-  -- 并发控制
-  'hoodie.write.concurrency.mode' = 'optimistic_concurrency_control',
+  -- 一键开启分区级并发控制
+  'hoodie.write.concurrency.mode' = 'OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT',
 
   -- ZK 锁
   'hoodie.write.lock.provider' = 'org.apache.hudi.client.transaction.lock.ZookeeperBasedLockProvider',
   'hoodie.write.lock.zookeeper.url' = 'zk1:2181,zk2:2181,zk3:2181',
-  'hoodie.write.lock.zookeeper.base_path' = '/hudi/locks',
-
-  -- 分区级 ECD
-  'hoodie.write.concurrency.early.conflict.detection.enable' = 'true',
-  'hoodie.write.concurrency.early.conflict.detection.strategy' =
-    'org.apache.hudi.table.marker.PartitionTransactionDirectMarkerBasedDetectionStrategy',
-
-  -- 过期心跳分区冲突检测
-  'hoodie.write.concurrency.expired.heartbeat.partition.conflict.check.enable' = 'true'
+  'hoodie.write.lock.zookeeper.base_path' = '/hudi/locks'
+  -- 其他参数已自动配置，无需手动指定
 );
 
 -- 写入数据
@@ -554,18 +598,15 @@ spark-submit \
   --conf "spark.serializer=org.apache.spark.serializer.KryoSerializer" \
   --conf "spark.sql.catalog.spark_catalog=org.apache.spark.sql.hudi.catalog.HoodieCatalog" \
   your-app.jar \
-  --hoodie-conf hoodie.write.concurrency.mode=optimistic_concurrency_control \
+  --hoodie-conf hoodie.write.concurrency.mode=OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT \
   --hoodie-conf hoodie.write.lock.provider=org.apache.hudi.client.transaction.lock.ZookeeperBasedLockProvider \
   --hoodie-conf hoodie.write.lock.zookeeper.url=zk1:2181,zk2:2181,zk3:2181 \
-  --hoodie-conf hoodie.write.lock.zookeeper.base_path=/hudi/locks \
-  --hoodie-conf hoodie.write.concurrency.early.conflict.detection.enable=true \
-  --hoodie-conf hoodie.write.concurrency.early.conflict.detection.strategy=org.apache.hudi.table.marker.PartitionTransactionDirectMarkerBasedDetectionStrategy \
-  --hoodie-conf hoodie.write.concurrency.expired.heartbeat.partition.conflict.check.enable=true
+  --hoodie-conf hoodie.write.lock.zookeeper.base_path=/hudi/locks
 ```
 
 ### 5.2 Flink 使用示例
 
-#### 方式一：Flink SQL
+#### 方式一：Flink SQL（推荐 — 一键模式）
 
 ```sql
 CREATE TABLE user_events (
@@ -583,21 +624,16 @@ WITH (
   'hoodie.datasource.write.recordkey.field' = 'user_id',
   'hoodie.datasource.write.precombine.field' = 'ts',
 
-  -- 并发控制
-  'hoodie.write.concurrency.mode' = 'optimistic_concurrency_control',
+  -- 一键开启分区级并发控制
+  'hoodie.write.concurrency.mode' = 'OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT',
 
   -- ZK 锁
   'write.lock.provider' = 'org.apache.hudi.client.transaction.lock.ZookeeperBasedLockProvider',
   'hoodie.write.lock.zookeeper.url' = 'zk1:2181,zk2:2181,zk3:2181',
-  'hoodie.write.lock.zookeeper.base_path' = '/hudi/locks',
+  'hoodie.write.lock.zookeeper.base_path' = '/hudi/locks'
 
-  -- 过期心跳分区冲突检测
   -- 注意：Flink 不走 ECD 流程，但过期心跳检测在 FlinkAppendHandle 中独立生效
-  'hoodie.write.concurrency.expired.heartbeat.partition.conflict.check.enable' = 'true',
-
-  -- 心跳配置
-  'hoodie.client.heartbeat.interval_in_ms' = '60000',
-  'hoodie.client.heartbeat.tolerable.misses' = '2'
+  -- 其他参数已自动配置
 );
 
 -- 实时写入
@@ -621,8 +657,9 @@ conf.setString(FlinkOptions.RECORD_KEY_FIELD, "user_id");
 conf.setString(FlinkOptions.PRECOMBINE_FIELD, "ts");
 conf.setString(FlinkOptions.PARTITION_PATH_FIELD, "dt");
 
-// 并发控制
-conf.setString("hoodie.write.concurrency.mode", "optimistic_concurrency_control");
+// 一键开启分区级并发控制
+conf.setString("hoodie.write.concurrency.mode",
+    "OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT");
 
 // ZK 锁
 conf.setString("hoodie.write.lock.provider",
@@ -630,12 +667,7 @@ conf.setString("hoodie.write.lock.provider",
 conf.setString("hoodie.write.lock.zookeeper.url", "zk1:2181,zk2:2181,zk3:2181");
 conf.setString("hoodie.write.lock.zookeeper.base_path", "/hudi/locks");
 
-// 过期心跳分区冲突检测
-conf.setString("hoodie.write.concurrency.expired.heartbeat.partition.conflict.check.enable", "true");
-
-// 心跳配置
-conf.setString("hoodie.client.heartbeat.interval_in_ms", "60000");
-conf.setString("hoodie.client.heartbeat.tolerable.misses", "2");
+// 其他参数已由 OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT 自动配置
 
 // 构建 pipeline 并提交
 HoodiePipeline.builder("user_events")
@@ -653,7 +685,7 @@ env.execute("Flink Hudi Writer");
 
 ### 5.3 Spark + Flink 混合并发写入示例
 
-以下是典型的生产环境部署拓扑：
+以下是典型的生产环境部署拓扑（使用一键模式）：
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -669,10 +701,15 @@ env.execute("Flink Hudi Writer");
 │   Spark 批处理作业        │  │   Flink 实时流作业        │
 │   每小时写 dt=2024-01-15 │  │   实时写 dt=2024-01-16   │
 │                          │  │                          │
-│   ECD: 启用              │  │   ECD: 不涉及            │
-│   策略: PartitionTx...   │  │   过期心跳检测: 启用      │
-│   过期心跳检测: 启用      │  │   (FlinkAppendHandle     │
-│   (ECD 扫描点集成)        │  │    独立检测)             │
+│   concurrency.mode:      │  │   concurrency.mode:      │
+│   OPTIMISTIC_CONCURRENCY │  │   OPTIMISTIC_CONCURRENCY │
+│   _CONTROL_PARTITION     │  │   _CONTROL_PARTITION     │
+│   _LIMIT                 │  │   _LIMIT                 │
+│                          │  │                          │
+│   (ECD + 过期心跳检测     │  │   (过期心跳检测           │
+│    全部自动配置)          │  │    自动配置，             │
+│                          │  │    FlinkAppendHandle     │
+│                          │  │    独立执行)              │
 └──────────────────────────┘  └──────────────────────────┘
               │                             │
               ▼                             ▼
@@ -693,21 +730,38 @@ env.execute("Flink Hudi Writer");
 **相同分区** → ECD 检测到冲突，后到的 writer 抛异常重试
 **心跳假死** → 过期心跳检测触发 rollover，自动写新 log 文件避免损坏
 
-### 5.4 配置参数速查表
+### 5.4 两种配置方式对比
 
-| 配置项 | 默认值 | 说明 | Spark | Flink |
-|--------|--------|------|:-----:|:-----:|
-| `hoodie.write.concurrency.mode` | `SINGLE_WRITER` | 设为 `optimistic_concurrency_control` 开启 OCC | 必需 | 必需 |
-| `hoodie.write.lock.provider` | `ZookeeperBasedLockProvider` | 分布式锁实现类 | 必需 | 必需 |
-| `hoodie.write.lock.zookeeper.url` | - | ZK 连接地址 | 必需 | 必需 |
-| `hoodie.write.lock.zookeeper.base_path` | - | ZK 锁根路径 | 必需 | 必需 |
-| `hoodie.write.concurrency.early.conflict.detection.enable` | `false` | 启用 ECD | 推荐 | 不涉及 |
-| `hoodie.write.concurrency.early.conflict.detection.strategy` | - | ECD 策略类名 | 推荐 | 不涉及 |
-| `hoodie.write.concurrency.expired.heartbeat.partition.conflict.check.enable` | `false` | 启用过期心跳分区冲突检测 | 推荐 | 推荐 |
-| `hoodie.client.heartbeat.interval_in_ms` | `60000` | 心跳间隔（ms） | 可选 | 可选 |
-| `hoodie.client.heartbeat.tolerable.misses` | `2` | 容忍丢失次数 | 可选 | 可选 |
+| 对比项 | 一键模式（推荐） | 手动模式 |
+|--------|:---------------:|:--------:|
+| `hoodie.write.concurrency.mode` | `OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT` | `OPTIMISTIC_CONCURRENCY_CONTROL` |
+| 需要手动设置 ECD？ | 否（自动） | 是 |
+| 需要手动设置 ECD 策略？ | 否（自动） | 是 |
+| 需要手动设置冲突解析策略？ | 否（自动） | 是 |
+| 需要手动设置过期心跳检测？ | 否（自动） | 是 |
+| 需要手动设置 LAZY 策略？ | 否（自动） | 否（OCC 也自动设置） |
+| 需要配置锁？ | 是 | 是 |
+| 适用场景 | 快速上手，标准分区级并发 | 需要自定义策略组合 |
+
+### 5.5 配置参数速查表
+
+| 配置项 | 默认值 | 说明 | 一键模式 | 手动模式(Spark) | Flink |
+|--------|--------|------|:--------:|:---------------:|:-----:|
+| `hoodie.write.concurrency.mode` | `SINGLE_WRITER` | 并发模式 | 设为`OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT` | 设为`OPTIMISTIC_CONCURRENCY_CONTROL` | 二选一 |
+| `hoodie.write.lock.provider` | - | 分布式锁实现类 | 必需 | 必需 | 必需 |
+| `hoodie.write.lock.zookeeper.url` | - | ZK 连接地址 | 必需 | 必需 | 必需 |
+| `hoodie.write.lock.zookeeper.base_path` | - | ZK 锁根路径 | 必需 | 必需 | 必需 |
+| `hoodie.write.concurrency.early.conflict.detection.enable` | `false` | 启用 ECD | **自动** | 手动设置 | 不涉及 |
+| `hoodie.write.concurrency.early.conflict.detection.strategy` | - | ECD 策略类名 | **自动** | 手动设置 | 不涉及 |
+| `hoodie.write.lock.conflict.resolution.strategy` | `SimpleConcurrent...` | 冲突解析策略 | **自动** | 手动设置 | **自动** |
+| `hoodie.write.concurrency.expired.heartbeat.partition.conflict.check.enable` | `false` | 过期心跳分区冲突检测 | **自动** | 手动设置 | **自动** |
+| `hoodie.cleaner.policy.failed.writes` | `EAGER` | 失败写入清理策略 | **自动** | **自动**(OCC) | **自动** |
+| `hoodie.write.markers.type` | 引擎相关 | Marker 类型 | **自动**(DIRECT) | 手动设置 | 默认DIRECT |
+| `hoodie.client.heartbeat.interval_in_ms` | `60000` | 心跳间隔（ms） | 可选 | 可选 | 可选 |
+| `hoodie.client.heartbeat.tolerable.misses` | `2` | 容忍丢失次数 | 可选 | 可选 | 可选 |
 
 > **注意**：
+> - **一键模式**只需设置 `hoodie.write.concurrency.mode=OPTIMISTIC_CONCURRENCY_CONTROL_PARTITION_LIMIT` + 锁配置，其余参数自动推导
 > - Spark 走 ECD 流程，过期心跳检测集成在 ECD 扫描点，与活跃心跳检测共享单次遍历
 > - Flink 不走 ECD 流程，过期心跳检测在 `FlinkAppendHandle.preLogFileOpen()` 中独立执行
 > - 心跳超时阈值 = `interval_in_ms` × `tolerable.misses`，建议不要设置过小以避免频繁误判
