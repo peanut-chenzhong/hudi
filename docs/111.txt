@@ -1,0 +1,15 @@
+工具已创建在 hudi-common/src/test/java/org/apache/hudi/common/tool/OBSLeaseTestTool.java。
+包含 5 个测试场景
+测试	场景	验证目标
+Test 1	2 个线程同时 append 同一文件	是否有类似 HDFS AlreadyBeingCreatedException 的互斥
+Test 2	第一个流未关闭时打开第二个 append 流	是否有流级别的租约保护
+Test 3	8 个线程同时 append	高并发压测，观察有多少线程能成功
+Test 4	一个线程 create（覆盖写），另一个线程 append	create 和 append 之间是否互斥
+Test 5	顺序 append 5 次后验证文件内容完整性	append 数据是否完整无丢失
+使用方式
+# 编译mvn package -pl hudi-common -DskipTests# 测试 OBSjava -cp "hudi-common/target/*:hudi-common/target/dependency/*:/path/to/hadoop-conf" \  org.apache.hudi.common.tool.OBSLeaseTestTool \  obs://your-bucket/test-dir/lease-test# 测试 HDFS（作为对照组）java -cp "..." org.apache.hudi.common.tool.OBSLeaseTestTool \  hdfs://namenode:8020/tmp/lease-test# 本地文件系统（快速验证工具本身能跑通）java -cp "..." org.apache.hudi.common.tool.OBSLeaseTestTool \  file:///tmp/lease-test
+输出示例解读
+工具会自动输出每个测试的结论，核心判断逻辑：
+"⚠ BOTH threads succeeded! NO lease protection" → OBS 不像 HDFS 有租约，并发 append 存在数据损坏风险
+"✓ Only ONE thread succeeded. Lease-like protection exists" → OBS 有类似 HDFS 的互斥，可以依赖存储层保护
+建议先用 HDFS 跑一遍作为对照组（应该看到租约保护），再用 OBS 跑一遍对比结果。如果 OBS 没有租约保护，那就更加确认了我们之前讨论的"特殊 ROLLBACK_WRITE_TOKEN"方案的必要性。
