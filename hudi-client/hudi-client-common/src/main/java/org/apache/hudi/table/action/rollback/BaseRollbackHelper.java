@@ -165,13 +165,26 @@ public class BaseRollbackHelper implements Serializable {
           // Let's emit markers for rollback as well. markers are emitted under rollback instant time.
           WriteMarkers writeMarkers = WriteMarkersFactory.get(config.getMarkersType(), table, instantTime);
 
-          writer = HoodieLogFormat.newWriterBuilder()
+          boolean isOCCMode = config.getWriteConcurrencyMode().supportsOptimisticConcurrencyControl();
+
+          HoodieLogFormat.WriterBuilder writerBuilder = HoodieLogFormat.newWriterBuilder()
               .onParentPath(FSUtils.constructAbsolutePath(metaClient.getBasePathV2().toString(), partitionPath))
               .withFileId(fileId)
               .overBaseCommit(latestBaseInstant)
               .withStorage(metaClient.getStorage())
               .withLogWriteCallback(getRollbackLogMarkerCallback(writeMarkers, partitionPath, fileId))
-              .withFileExtension(HoodieLogFile.DELTA_EXTENSION).build();
+              .withFileExtension(HoodieLogFile.DELTA_EXTENSION);
+
+          if (isOCCMode) {
+            // In OCC mode, write ROLLBACK_BLOCK to a dedicated log file with a fixed ultra-high version
+            // number to avoid concurrent append conflicts with normal writers on object storage (e.g. OBS)
+            // that lacks cross-process lease protection.
+            writerBuilder.withLogVersion(HoodieLogFile.ROLLBACK_LOG_VERSION)
+                .withLogWriteToken(HoodieLogFile.ROLLBACK_WRITE_TOKEN)
+                .withSizeThreshold(Long.MAX_VALUE);
+          }
+
+          writer = writerBuilder.build();
 
           // generate metadata
           if (doDelete) {

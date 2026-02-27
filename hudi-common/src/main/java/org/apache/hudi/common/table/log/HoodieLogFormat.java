@@ -250,8 +250,10 @@ public interface HoodieLogFormat {
 
       if (logVersion == null) {
         LOG.info("Computing the next log version for " + logFileId + " in " + parentPath);
+        // Use non-rollback version query to exclude rollback-dedicated log files (version 999999999)
+        // so that normal writers do not accidentally append to rollback files.
         Option<Pair<Integer, String>> versionAndWriteToken =
-            FSUtils.getLatestLogVersion(storage, parentPath, logFileId, fileExtension, instantTime);
+            FSUtils.getLatestNonRollbackLogVersion(storage, parentPath, logFileId, fileExtension, instantTime);
         if (versionAndWriteToken.isPresent()) {
           logVersion = versionAndWriteToken.get().getKey();
           logWriteToken = versionAndWriteToken.get().getValue();

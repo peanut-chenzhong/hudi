@@ -609,12 +609,40 @@ public class FSUtils {
   }
 
   /**
-   * computes the next log version for the specified fileId in the partition path.
+   * Get all non-rollback log files for the passed in file-id in the partition path.
+   * Excludes log files with {@link HoodieLogFile#ROLLBACK_LOG_VERSION} used by rollback operations in OCC mode.
+   */
+  public static Stream<HoodieLogFile> getAllNonRollbackLogFiles(HoodieStorage storage, StoragePath partitionPath,
+      final String fileId, final String logFileExtension, final String baseCommitTime) throws IOException {
+    return getAllLogFiles(storage, partitionPath, fileId, logFileExtension, baseCommitTime)
+        .filter(f -> f.getLogVersion() < HoodieLogFile.ROLLBACK_LOG_VERSION);
+  }
+
+  /**
+   * Get the latest non-rollback log version for the fileId in the partition path.
+   * Excludes log files with {@link HoodieLogFile#ROLLBACK_LOG_VERSION} to prevent normal writers
+   * from appending to rollback-dedicated log files.
+   */
+  public static Option<Pair<Integer, String>> getLatestNonRollbackLogVersion(HoodieStorage storage, StoragePath partitionPath,
+      final String fileId, final String logFileExtension, final String baseCommitTime) throws IOException {
+    Option<HoodieLogFile> latestLogFile =
+        getLatestLogFile(getAllNonRollbackLogFiles(storage, partitionPath, fileId, logFileExtension, baseCommitTime));
+    if (latestLogFile.isPresent()) {
+      return Option
+          .of(Pair.of(latestLogFile.get().getLogVersion(), latestLogFile.get().getLogWriteToken()));
+    }
+    return Option.empty();
+  }
+
+  /**
+   * Computes the next log version for the specified fileId in the partition path.
+   * Excludes rollback log files to ensure normal writers do not compute versions based on
+   * the rollback-dedicated log file ({@link HoodieLogFile#ROLLBACK_LOG_VERSION}).
    */
   public static int computeNextLogVersion(HoodieStorage storage, StoragePath partitionPath, final String fileId,
                                           final String logFileExtension, final String baseCommitTime) throws IOException {
     Option<Pair<Integer, String>> currentVersionWithWriteToken =
-        getLatestLogVersion(storage, partitionPath, fileId, logFileExtension, baseCommitTime);
+        getLatestNonRollbackLogVersion(storage, partitionPath, fileId, logFileExtension, baseCommitTime);
     // handle potential overflow
     return (currentVersionWithWriteToken.isPresent()) ? currentVersionWithWriteToken.get().getKey() + 1
         : HoodieLogFile.LOGFILE_BASE_VERSION;

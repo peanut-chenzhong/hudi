@@ -45,6 +45,20 @@ public class HoodieLogFile implements Serializable {
   public static final String LOG_FILE_PREFIX = ".";
   public static final Integer LOGFILE_BASE_VERSION = 1;
 
+  /**
+   * Fixed log version used for rollback log files in OCC (Optimistic Concurrency Control) mode.
+   * Rollback operations write ROLLBACK_BLOCK to a dedicated log file with this ultra-high version
+   * number, ensuring physical isolation from normal writer log files and guaranteeing that
+   * ROLLBACK_BLOCKs are always read last (due to version-based sort order).
+   */
+  public static final int ROLLBACK_LOG_VERSION = 999999999;
+
+  /**
+   * Fixed write token used for rollback log files in OCC mode.
+   * Uses the standard "0-0-0" format to ensure compatibility with LOG_FILE_PATTERN regex.
+   */
+  public static final String ROLLBACK_WRITE_TOKEN = "0-0-0";
+
   private static final Comparator<HoodieLogFile> LOG_FILE_COMPARATOR = new LogFileComparator();
   private static final Comparator<HoodieLogFile> LOG_FILE_COMPARATOR_REVERSED = new LogFileComparator().reversed();
 
