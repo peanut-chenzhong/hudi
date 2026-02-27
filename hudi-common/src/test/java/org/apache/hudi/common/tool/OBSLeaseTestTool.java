@@ -23,8 +23,11 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
@@ -68,8 +71,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class OBSLeaseTestTool {
 
-  private static final String SEPARATOR = "=".repeat(80);
-  private static final String THIN_SEPARATOR = "-".repeat(60);
+  private static final String SEPARATOR = repeatChar('=', 80);
+  private static final String THIN_SEPARATOR = repeatChar('-', 60);
 
   private final FileSystem fs;
   private final Path basePath;
@@ -382,13 +385,12 @@ public class OBSLeaseTestTool {
     StringBuilder expectedContent = new StringBuilder();
 
     // 初始文件内容
-    String initContent = new String(
-        fs.open(testFile).readAllBytes(), StandardCharsets.UTF_8);
+    String initContent = new String(readAllBytes(fs.open(testFile)), StandardCharsets.UTF_8);
     expectedContent.append(initContent);
     totalExpectedBytes += initContent.length();
 
     for (int i = 0; i < numAppends; i++) {
-      String data = "BLOCK-" + i + "-" + "X".repeat(100) + "\n";
+      String data = "BLOCK-" + i + "-" + repeatChar('X', 100) + "\n";
       FSDataOutputStream out = fs.append(testFile);
       out.write(data.getBytes(StandardCharsets.UTF_8));
       out.hflush();
@@ -400,8 +402,7 @@ public class OBSLeaseTestTool {
 
     // 读取并验证
     long actualSize = fs.getFileStatus(testFile).getLen();
-    String actualContent = new String(
-        fs.open(testFile).readAllBytes(), StandardCharsets.UTF_8);
+    String actualContent = new String(readAllBytes(fs.open(testFile)), StandardCharsets.UTF_8);
 
     System.out.println();
     System.out.println("Expected size: " + totalExpectedBytes + " bytes");
@@ -465,6 +466,26 @@ public class OBSLeaseTestTool {
       } catch (Exception e) {
         System.out.println("  Failed to close " + name + ": " + e.getMessage());
       }
+    }
+  }
+
+  private static String repeatChar(char c, int count) {
+    char[] chars = new char[count];
+    Arrays.fill(chars, c);
+    return new String(chars);
+  }
+
+  private static byte[] readAllBytes(InputStream in) throws IOException {
+    try {
+      ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+      byte[] tmp = new byte[4096];
+      int bytesRead;
+      while ((bytesRead = in.read(tmp)) != -1) {
+        buffer.write(tmp, 0, bytesRead);
+      }
+      return buffer.toByteArray();
+    } finally {
+      in.close();
     }
   }
 
