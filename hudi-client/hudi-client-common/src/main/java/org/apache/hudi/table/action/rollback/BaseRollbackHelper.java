@@ -165,7 +165,13 @@ public class BaseRollbackHelper implements Serializable {
           // Let's emit markers for rollback as well. markers are emitted under rollback instant time.
           WriteMarkers writeMarkers = WriteMarkersFactory.get(config.getMarkersType(), table, instantTime);
 
-          boolean isOCCMode = config.getWriteConcurrencyMode().supportsOptimisticConcurrencyControl();
+          // Check if rollback log isolation is needed to avoid concurrent append conflicts.
+          // Use combined conditions for reliability:
+          //   1. OCC mode explicitly configured — covers writer-side rollback scenarios (e.g. EAGER policy + OCC)
+          //   2. LAZY clean policy — covers async clean job scenarios where OCC may not be
+          //      explicitly set in the clean job's config, but concurrent writers are still active
+          boolean needRollbackLogIsolation = config.getWriteConcurrencyMode().supportsOptimisticConcurrencyControl()
+              || config.getFailedWritesCleanPolicy().isLazy();
 
           HoodieLogFormat.WriterBuilder writerBuilder = HoodieLogFormat.newWriterBuilder()
               .onParentPath(FSUtils.constructAbsolutePath(metaClient.getBasePathV2().toString(), partitionPath))
@@ -175,10 +181,10 @@ public class BaseRollbackHelper implements Serializable {
               .withLogWriteCallback(getRollbackLogMarkerCallback(writeMarkers, partitionPath, fileId))
               .withFileExtension(HoodieLogFile.DELTA_EXTENSION);
 
-          if (isOCCMode) {
-            // In OCC mode, write ROLLBACK_BLOCK to a dedicated log file with a fixed ultra-high version
-            // number to avoid concurrent append conflicts with normal writers on object storage (e.g. OBS)
-            // that lacks cross-process lease protection.
+          if (needRollbackLogIsolation) {
+            // Write ROLLBACK_BLOCK to a dedicated log file with a fixed ultra-high version number
+            // (log.999999999_0-0-0) to avoid concurrent append conflicts with normal writers on
+            // object storage (e.g. OBS) that lacks cross-process lease protection.
             writerBuilder.withLogVersion(HoodieLogFile.ROLLBACK_LOG_VERSION)
                 .withLogWriteToken(HoodieLogFile.ROLLBACK_WRITE_TOKEN)
                 .withSizeThreshold(Long.MAX_VALUE);
