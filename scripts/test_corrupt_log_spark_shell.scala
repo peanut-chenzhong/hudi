@@ -2,15 +2,16 @@
 // MOR Log 文件坏块影响验证脚本 (spark-shell 执行)
 // ===========================================================================
 //
-// 包含两个测试场景:
+// 包含三个测试场景:
 //
-//   场景 A - 跨文件: log.1 尾部追加坏数据 → log.2 的数据是否丢失
-//   场景 B - 文件内: log.1 中间插入坏数据(block1 → 坏数据 → block2) → block2 是否丢失
+//   场景 A - 跨文件: log.1 尾部追加坏数据(无 MAGIC 头) → log.2 数据丢失
+//   场景 B - 文件内: log.1 中间插入坏数据(无 MAGIC 头) → block2 丢失
+//   场景 C - 文件内: log.1 中间插入有 MAGIC 头但内容损坏的坏块 → 坏块被跳过
 //
 // 原理:
 //   Hudi 读取 log 文件时，每个 block 以 MAGIC 字节(#HUDI#) 开头。
-//   如果在读取下一个 block 时遇到 >= 6 字节的非 MAGIC 数据，会抛出
-//   CorruptedLogFileException (RuntimeException)，导致整个 scan 操作失败。
+//   - 无 MAGIC 头: readMagic() 抛 CorruptedLogFileException → scan 崩溃
+//   - 有 MAGIC 头但内容坏: readBlock() 检测到 corrupt → createCorruptBlock() 跳过
 //
 // 使用方式:
 //   spark-shell --packages org.apache.hudi:hudi-spark3-bundle_2.12:0.x.x
@@ -24,7 +25,7 @@ import org.apache.hadoop.fs.{FileSystem, Path, FSDataOutputStream}
 import scala.collection.mutable.ArrayBuffer
 
 // ====================================================================
-// 公共配置
+// 公共配置 (请根据实际环境修改)
 // ====================================================================
 // HDFS:
 val baseDir = "/tmp/hudi"
@@ -65,19 +66,35 @@ def printBigSep(title: String): Unit = {
   println("#" * 70)
 }
 
-def writeHudiData(basePath: String, tableName: String, df: org.apache.spark.sql.DataFrame,
-                  operation: String, mode: SaveMode): Unit = {
-  df.write.format("hudi")
-    .option("hoodie.table.name", tableName)
-    .option("hoodie.datasource.write.table.type", "MERGE_ON_READ")
-    .option("hoodie.datasource.write.recordkey.field", "id")
-    .option("hoodie.datasource.write.precombine.field", "ts")
-    .option("hoodie.datasource.write.partitionpath.field", "dt")
-    .option("hoodie.datasource.write.operation", operation)
-    .option("hoodie.insert.shuffle.parallelism", "1")
-    .option("hoodie.upsert.shuffle.parallelism", "1")
-    .mode(mode)
-    .save(basePath)
+// 创建 Hudi MOR 表
+def createHudiMorTable(tableName: String, basePath: String): Unit = {
+  spark.sql(s"DROP TABLE IF EXISTS $tableName")
+  spark.sql(
+    s"""
+       |CREATE TABLE $tableName (
+       |  id BIGINT,
+       |  name STRING,
+       |  ts BIGINT,
+       |  dt STRING
+       |) USING hudi
+       |TBLPROPERTIES (
+       |  'type' = 'mor',
+       |  'primaryKey' = 'id',
+       |  'preCombineField' = 'ts',
+       |  'hoodie.insert.shuffle.parallelism' = '1',
+       |  'hoodie.upsert.shuffle.parallelism' = '1',
+       |  'hoodie.delete.shuffle.parallelism' = '1'
+       |)
+       |PARTITIONED BY (dt)
+       |LOCATION '$basePath'
+    """.stripMargin)
+  println(s"  表 $tableName 已创建 (MOR, location=$basePath)")
+}
+
+// 向 Hudi 表写入数据 (INSERT INTO 会自动按 primaryKey 做 upsert)
+def writeHudiData(tableName: String, df: org.apache.spark.sql.DataFrame): Unit = {
+  df.createOrReplaceTempView("_tmp_corrupt_test_data")
+  spark.sql(s"INSERT INTO $tableName SELECT id, name, ts, dt FROM _tmp_corrupt_test_data")
 }
 
 def queryAndReport(basePath: String, label: String): Unit = {
@@ -148,7 +165,7 @@ def queryReadOptimized(basePath: String): Unit = {
 // ####################################################################
 // ####################################################################
 //
-//  场景 A: 跨文件 — log.1 尾部坏数据导致 log.2 数据丢失
+//  场景 A: 跨文件 — log.1 尾部坏数据(无 MAGIC)导致 log.2 数据丢失
 //
 // ####################################################################
 // ####################################################################
@@ -160,7 +177,11 @@ val basePathA = s"$baseDir/$tableNameA"
 val fsA = getFs(basePathA)
 val partDirA = new Path(basePathA + "/" + partitionPathStr)
 
-// ------ A.1: Insert 100 条记录 ------
+// ------ A.0: 建表 ------
+printSep("A.0: 创建 MOR 表")
+createHudiMorTable(tableNameA, basePathA)
+
+// ------ A.1: Insert 100 条记录 → parquet base ------
 printSep("A.1: Insert 100 条记录 (创建 parquet base)")
 
 val dfA1 = spark.range(1, 101).toDF("id")
@@ -168,7 +189,7 @@ val dfA1 = spark.range(1, 101).toDF("id")
   .withColumn("ts", lit(1000L))
   .withColumn("dt", lit(partitionValue))
 
-writeHudiData(basePathA, tableNameA, dfA1, "insert", SaveMode.Overwrite)
+writeHudiData(tableNameA, dfA1)
 println("  Insert 完成!")
 printLogFiles(fsA, partDirA, "Insert 之后")
 
@@ -180,7 +201,7 @@ val dfA2 = spark.range(1, 51).toDF("id")
   .withColumn("ts", lit(2000L))
   .withColumn("dt", lit(partitionValue))
 
-writeHudiData(basePathA, tableNameA, dfA2, "upsert", SaveMode.Append)
+writeHudiData(tableNameA, dfA2)
 println("  第一次 Upsert 完成!")
 printLogFiles(fsA, partDirA, "第一次 Upsert")
 
@@ -203,7 +224,7 @@ val dfA3 = spark.range(51, 101).toDF("id")
   .withColumn("ts", lit(3000L))
   .withColumn("dt", lit(partitionValue))
 
-writeHudiData(basePathA, tableNameA, dfA3, "upsert", SaveMode.Append)
+writeHudiData(tableNameA, dfA3)
 println("  第二次 Upsert 完成!")
 
 // ------ A.5: 重命名新 log.1 → log.2, 恢复原始 log.1 ------
@@ -225,7 +246,7 @@ printSep("A.6: 验证正常读取 (未损坏)")
 queryAndReport(basePathA, "正常 Snapshot 查询")
 
 // ------ A.7: 向 log.1 尾部追加坏数据 ------
-printSep("A.7: 向 log.1 尾部追加坏数据")
+printSep("A.7: 向 log.1 尾部追加坏数据 (无 MAGIC 头)")
 
 val sizeBeforeA = fsA.getFileStatus(origLog1A).getLen
 val corruptDataA = "CORRUPT_DATA_BY_CONCURRENT_WRITER_NO_MAGIC!!!".getBytes("UTF-8")
@@ -237,15 +258,15 @@ streamA.close()
 println(s"  文件: ${origLog1A.getName}")
 println(s"  追加前大小: $sizeBeforeA bytes")
 println(s"  追加后大小: ${fsA.getFileStatus(origLog1A).getLen} bytes")
-println(s"  追加坏数据: ${corruptDataA.length} bytes")
+println(s"  追加坏数据: ${corruptDataA.length} bytes (无 MAGIC 头)")
 
 // ------ A.8: 查询验证 (预期失败) ------
 printSep("A.8: 查询验证 — log.1 尾部损坏")
 println()
 println("  文件结构:")
-println("    log.1: [block1_batch2] [CORRUPT_TAIL]")
-println("    log.2: [block2_batch3]")
-println("  预期: reader 在 log.1 尾部遇到坏数据 → 异常 → log.2 不可读")
+println("    log.1: [#HUDI# block1_batch2] [CORRUPT_TAIL (无 MAGIC)]")
+println("    log.2: [#HUDI# block2_batch3]")
+println("  预期: readMagic() 在 log.1 尾部遇到坏数据 → CorruptedLogFileException → log.2 不可读")
 println()
 queryAndReport(basePathA, "损坏后 Snapshot 查询")
 
@@ -256,17 +277,21 @@ queryReadOptimized(basePathA)
 // ####################################################################
 // ####################################################################
 //
-//  场景 B: 文件内 — log 文件中间有坏数据, 后续 block 丢失
+//  场景 B: 文件内 — log 文件中间有坏数据(无 MAGIC), 后续 block 丢失
 //
 // ####################################################################
 // ####################################################################
 
-printBigSep("场景 B: 文件内 — log 文件中间坏数据 → 后续 block 丢失")
+printBigSep("场景 B: 文件内 — 中间坏数据(无 MAGIC) → 后续 block 丢失")
 
 val tableNameB = "test_corrupt_log_middle_block"
 val basePathB = s"$baseDir/$tableNameB"
 val fsB = getFs(basePathB)
 val partDirB = new Path(basePathB + "/" + partitionPathStr)
+
+// ------ B.0: 建表 ------
+printSep("B.0: 创建 MOR 表")
+createHudiMorTable(tableNameB, basePathB)
 
 // ------ B.1: Insert 100 条记录 ------
 printSep("B.1: Insert 100 条记录 (创建 parquet base)")
@@ -276,7 +301,7 @@ val dfB1 = spark.range(1, 101).toDF("id")
   .withColumn("ts", lit(1000L))
   .withColumn("dt", lit(partitionValue))
 
-writeHudiData(basePathB, tableNameB, dfB1, "insert", SaveMode.Overwrite)
+writeHudiData(tableNameB, dfB1)
 println("  Insert 完成!")
 printLogFiles(fsB, partDirB, "Insert 之后")
 
@@ -288,7 +313,7 @@ val dfB2 = spark.range(1, 51).toDF("id")
   .withColumn("ts", lit(2000L))
   .withColumn("dt", lit(partitionValue))
 
-writeHudiData(basePathB, tableNameB, dfB2, "upsert", SaveMode.Append)
+writeHudiData(tableNameB, dfB2)
 println("  第一次 Upsert 完成!")
 printLogFiles(fsB, partDirB, "第一次 Upsert")
 
@@ -296,8 +321,8 @@ printLogFiles(fsB, partDirB, "第一次 Upsert")
 printSep("B.3: 验证正常读取 (单 block, 无损坏)")
 queryAndReport(basePathB, "正常 Snapshot 查询")
 
-// ------ B.4: 向 log.1 尾部追加坏数据 (模拟并发写入的损坏) ------
-printSep("B.4: 向 log.1 当前尾部追加坏数据 (在 block1 之后)")
+// ------ B.4: 向 log.1 尾部追加坏数据 (无 MAGIC 头) ------
+printSep("B.4: 向 log.1 当前尾部追加坏数据 (无 MAGIC 头, 在 block1 之后)")
 
 val logFilesB2 = listLogFiles(fsB, partDirB)
 require(logFilesB2.nonEmpty, "ERROR: 未找到 log 文件!")
@@ -315,9 +340,9 @@ val sizeAfterCorruptB = fsB.getFileStatus(log1B).getLen
 println(s"  文件: ${log1B.getName}")
 println(s"  追加前大小: $sizeBeforeCorruptB bytes (包含 block1)")
 println(s"  追加后大小: $sizeAfterCorruptB bytes (block1 + 坏数据)")
-println(s"  追加坏数据: ${corruptDataB.length} bytes")
+println(s"  追加坏数据: ${corruptDataB.length} bytes (无 MAGIC 头)")
 println()
-println("  当前 log.1 结构: [block1_batch2] [CORRUPT_BYTES]")
+println("  当前 log.1 结构: [#HUDI# block1_batch2] [CORRUPT_BYTES (无 MAGIC)]")
 
 // ------ B.5: 第二次 Upsert → writer append block2 到 log.1 (坏数据之后) ------
 printSep("B.5: 第二次 Upsert (更新 ID 51-100) → block2 追加到 log.1 坏数据之后")
@@ -330,21 +355,21 @@ val dfB3 = spark.range(51, 101).toDF("id")
   .withColumn("ts", lit(3000L))
   .withColumn("dt", lit(partitionValue))
 
-writeHudiData(basePathB, tableNameB, dfB3, "upsert", SaveMode.Append)
+writeHudiData(tableNameB, dfB3)
 
 val sizeAfterB3 = fsB.getFileStatus(log1B).getLen
 println(s"  第二次 Upsert 完成!")
 println(s"  log.1 最终大小: $sizeAfterB3 bytes")
 println()
-println("  最终 log.1 结构: [block1_batch2] [CORRUPT_BYTES] [block2_batch3]")
-println("                      ↑ 有效           ↑ >= 6字节       ↑ 有效但不可达")
-println("                                        非 MAGIC 数据")
+println("  最终 log.1 结构: [#HUDI# block1_batch2] [CORRUPT (无 MAGIC)] [#HUDI# block2_batch3]")
+println("                      ↑ 有效               ↑ >= 6字节              ↑ 有效但不可达")
+println("                                            非 MAGIC 数据")
 printLogFiles(fsB, partDirB, "第二次 Upsert (注意仍然是同一个 log 文件)")
 
 // ------ B.6: 查询验证 (预期失败) ------
-printSep("B.6: 查询验证 — log.1 中间有坏数据")
+printSep("B.6: 查询验证 — log.1 中间有坏数据 (无 MAGIC)")
 println()
-println("  预期: reader 读完 block1 → 遇到坏数据 → CorruptedLogFileException")
+println("  预期: reader 读完 block1 → readMagic() 遇到坏数据 → CorruptedLogFileException")
 println("  block2 (batch3 数据) 虽然有效, 但永远不会被读到")
 println()
 queryAndReport(basePathB, "损坏后 Snapshot 查询")
@@ -359,8 +384,8 @@ queryReadOptimized(basePathB)
 //
 //  与场景 B 的区别:
 //    场景 B: 坏数据没有 MAGIC 头 → readMagic() 抛异常 → 致命
-//    场景 C: 坏数据有 MAGIC 头(#HUDI#) → readBlock() 检测到 corrupt
-//           → 调用 createCorruptBlock() → scanForNextAvailableBlockOffset()
+//    场景 C: 坏数据有 MAGIC 头(#HUDI#) → readBlock() 中检测到 corrupt
+//           → createCorruptBlock() → scanForNextAvailableBlockOffset()
 //           → 返回 HoodieCorruptBlock 对象 → reader 继续读后续 block
 //
 // ####################################################################
@@ -373,6 +398,10 @@ val basePathC = s"$baseDir/$tableNameC"
 val fsC = getFs(basePathC)
 val partDirC = new Path(basePathC + "/" + partitionPathStr)
 
+// ------ C.0: 建表 ------
+printSep("C.0: 创建 MOR 表")
+createHudiMorTable(tableNameC, basePathC)
+
 // ------ C.1: Insert 100 条记录 ------
 printSep("C.1: Insert 100 条记录 (创建 parquet base)")
 
@@ -381,7 +410,7 @@ val dfC1 = spark.range(1, 101).toDF("id")
   .withColumn("ts", lit(1000L))
   .withColumn("dt", lit(partitionValue))
 
-writeHudiData(basePathC, tableNameC, dfC1, "insert", SaveMode.Overwrite)
+writeHudiData(tableNameC, dfC1)
 println("  Insert 完成!")
 printLogFiles(fsC, partDirC, "Insert 之后")
 
@@ -393,7 +422,7 @@ val dfC2 = spark.range(1, 51).toDF("id")
   .withColumn("ts", lit(2000L))
   .withColumn("dt", lit(partitionValue))
 
-writeHudiData(basePathC, tableNameC, dfC2, "upsert", SaveMode.Append)
+writeHudiData(tableNameC, dfC2)
 println("  第一次 Upsert 完成!")
 printLogFiles(fsC, partDirC, "第一次 Upsert")
 
@@ -409,6 +438,12 @@ val sizeBeforeCorruptC = fsC.getFileStatus(log1C).getLen
 // 构造: #HUDI# + 垃圾内容 (模拟写了 MAGIC 后 writer 崩溃或数据错乱)
 // MAGIC: 6 bytes = [#, H, U, D, I, #]
 // 后面跟随垃圾数据, 让 blockSize (readLong) 得到一个随机值
+// reader 流程:
+//   readMagic() → 找到 #HUDI# → 成功
+//   readBlock() → readLong() 得到垃圾 blockSize
+//   isBlockCorrupted() → seek 到 footer 位置 → 大概率 EOF 或不匹配 → corrupted=true
+//   createCorruptBlock() → scanForNextAvailableBlockOffset() → 找到下一个 #HUDI#
+//   返回 HoodieCorruptBlock → 继续读后续 block
 val magicBytes = Array[Byte]('#', 'H', 'U', 'D', 'I', '#')
 val garbageContent = "THIS_IS_GARBAGE_AFTER_MAGIC_SIMULATING_PARTIAL_WRITE_OR_INTERLEAVED_CONCURRENT_APPEND!!!".getBytes("UTF-8")
 val corruptBlockWithMagic = magicBytes ++ garbageContent
@@ -429,7 +464,7 @@ println("  当前 log.1 结构: [#HUDI# block1] [#HUDI# <garbage>]")
 
 // ------ C.4: 第二次 Upsert → writer append block2 到 log.1 ------
 printSep("C.4: 第二次 Upsert (更新 ID 51-100) → block2 追加到 log.1")
-println("  注意: writer 在坏数据之后继续 append, block2 有完整的 MAGIC 头")
+println("  注意: writer 在坏数据之后继续 append, block2 有完整的 #HUDI# 头")
 println()
 
 val dfC3 = spark.range(51, 101).toDF("id")
@@ -437,7 +472,7 @@ val dfC3 = spark.range(51, 101).toDF("id")
   .withColumn("ts", lit(3000L))
   .withColumn("dt", lit(partitionValue))
 
-writeHudiData(basePathC, tableNameC, dfC3, "upsert", SaveMode.Append)
+writeHudiData(tableNameC, dfC3)
 
 val sizeAfterC3 = fsC.getFileStatus(log1C).getLen
 println(s"  第二次 Upsert 完成!")
@@ -452,7 +487,7 @@ println("    1. reader 读完 block1 → OK")
 println("    2. hasNext() → readMagic() 找到 #HUDI# → 返回 true")
 println("    3. next() → readBlock() → 读 blockSize (垃圾) → isBlockCorrupted() → true")
 println("    4. createCorruptBlock() → scanForNextAvailableBlockOffset() → 找到 block2 的 #HUDI#")
-println("    5. 返回 HoodieCorruptBlock (不是异常!)")
+println("    5. 返回 HoodieCorruptBlock (不是异常, 是可处理的对象)")
 println("    6. 继续读 block2 → OK!")
 printLogFiles(fsC, partDirC, "第二次 Upsert")
 
@@ -496,7 +531,7 @@ println("""
   |    2. 并发写入场景中, 两种损坏都可能发生:
   |       - 字节级交错 → 连 MAGIC 都被破坏 → 致命 (场景 A/B)
   |       - 一方写完 MAGIC 后崩溃/数据错乱 → 有 MAGIC 无有效内容 → 可恢复 (场景 C)
-  |    3. 即使场景 C 可以跳过坏块, 坏块中包含的数据仍然丢失
+  |    3. 即使场景 C 可以跳过坏块, 坏块本身包含的数据仍然丢失
   |
   |  OCC 风险:
   |    rollback 和 normal writer 并发 append 同一个 log 文件时:
@@ -507,6 +542,9 @@ println("""
 
 println(s"""
   |  清理命令:
+  |    spark.sql("DROP TABLE IF EXISTS $tableNameA")
+  |    spark.sql("DROP TABLE IF EXISTS $tableNameB")
+  |    spark.sql("DROP TABLE IF EXISTS $tableNameC")
   |    hadoop fs -rm -r $basePathA
   |    hadoop fs -rm -r $basePathB
   |    hadoop fs -rm -r $basePathC
