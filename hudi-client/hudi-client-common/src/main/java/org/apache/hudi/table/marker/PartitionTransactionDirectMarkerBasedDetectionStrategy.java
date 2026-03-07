@@ -18,17 +18,13 @@
 
 package org.apache.hudi.table.marker;
 
-import org.apache.hudi.client.transaction.lock.LockManager;
-import org.apache.hudi.client.transaction.lock.ZookeeperBasedLockProvider;
-import org.apache.hudi.common.config.LockConfiguration;
-import org.apache.hudi.common.config.TypedProperties;
+import org.apache.hudi.client.transaction.PartitionDirectMarkerTransactionManager;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.util.MarkerUtils;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieEarlyConflictDetectionException;
 import org.apache.hudi.exception.HoodieIOException;
-import org.apache.hudi.exception.HoodieNotSupportedException;
 import org.apache.hudi.storage.HoodieStorage;
 import org.apache.hudi.storage.StoragePath;
 
@@ -148,15 +144,14 @@ public class PartitionTransactionDirectMarkerBasedDetectionStrategy
 
   /**
    * Acquires lock, performs conflict detection, and creates partition directory.
+   * Uses {@link PartitionDirectMarkerTransactionManager} for partition-level locking.
    */
   private void detectConflictAndCreateDirectoryWithLock() {
-    LockManager lockManager = new LockManager(writeConfig, fs,
-        createPartitionLockProps(writeConfig, partitionPath));
+    PartitionDirectMarkerTransactionManager txnManager =
+        new PartitionDirectMarkerTransactionManager(writeConfig, fs, partitionPath);
     try {
-      // Acquire partition-level lock
-      LOG.info("Acquiring partition lock for partition: {} at instant: {}", partitionPath, instantTime);
-      lockManager.lock();
-      LOG.info("Partition lock acquired for partition: {} at instant: {}", partitionPath, instantTime);
+      // Acquire partition-level lock via transaction manager
+      txnManager.beginTransaction(instantTime);
 
       // Double-check: another task might have created the directory while we were waiting for lock
       if (storage.exists(markerPartitionDirPath)) {
@@ -185,41 +180,8 @@ public class PartitionTransactionDirectMarkerBasedDetectionStrategy
       LOG.warn("Exception occurs during partition-based early conflict detection with transaction lock.", e);
       throw e;
     } finally {
-      // Always release lock
-      try {
-        lockManager.unlock();
-        LOG.info("Partition lock released for partition: {} at instant: {}", partitionPath, instantTime);
-      } catch (Exception ignored) {
-        // Lock might already be released
-      }
-      lockManager.close();
+      txnManager.endTransaction(instantTime);
+      txnManager.close();
     }
-  }
-
-  /**
-   * Creates lock properties for partition-level locking.
-   * Uses only the partition path as the lock key, so all operations on the same 
-   * partition will compete for the same lock.
-   *
-   * @param writeConfig Hudi write configs.
-   * @param partitionPath Relative partition path.
-   * @return Updated lock related configs with partition path as lock key.
-   */
-  private static TypedProperties createPartitionLockProps(
-      HoodieWriteConfig writeConfig, String partitionPath) {
-    if (!ZookeeperBasedLockProvider.class.getName().equals(writeConfig.getLockProviderClass())) {
-      throw new HoodieNotSupportedException(
-          "Only ZK-based lock is supported for PartitionTransactionDirectMarkerBasedDetectionStrategy. "
-          + "Current lock provider: " + writeConfig.getLockProviderClass());
-    }
-    TypedProperties props = new TypedProperties(writeConfig.getProps());
-    // Use partition path as lock key (not partitionPath/fileId)
-    // This ensures all operations on the same partition compete for the same lock
-    String lockKey = (partitionPath != null && !partitionPath.isEmpty()) 
-        ? "partition_lock_" + partitionPath.replace("/", "_")
-        : "partition_lock_default";
-    props.setProperty(LockConfiguration.ZK_LOCK_KEY_PROP_KEY, lockKey);
-    LOG.debug("Created partition lock with key: {}", lockKey);
-    return props;
   }
 }
