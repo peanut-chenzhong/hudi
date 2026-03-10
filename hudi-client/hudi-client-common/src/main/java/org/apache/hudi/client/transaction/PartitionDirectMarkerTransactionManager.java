@@ -19,6 +19,7 @@
 
 package org.apache.hudi.client.transaction;
 
+import org.apache.hadoop.fs.Path;
 import org.apache.hudi.client.transaction.lock.LockManager;
 import org.apache.hudi.client.transaction.lock.ZookeeperBasedLockProvider;
 import org.apache.hudi.common.config.LockConfiguration;
@@ -80,8 +81,18 @@ public class PartitionDirectMarkerTransactionManager extends TransactionManager 
 
   /**
    * Creates lock properties with partition-level lock key.
-   * Uses the partition path (not partition + fileId) as the lock key,
-   * so all operations on the same partition compete for the same lock.
+   *
+   * <p>Uses the absolute partition path (basePath + partitionPath) as the lock key
+   * to ensure cross-table isolation. Different tables with the same partition path
+   * will have different lock keys because their basePaths differ.
+   *
+   * <p>Example:
+   * <ul>
+   *   <li>basePath=/data/hudi/table_a, partition=dt=2024-01-15
+   *       → lockKey=partition_lock__data_hudi_table_a_dt=2024-01-15</li>
+   *   <li>basePath=/data/hudi/table_b, partition=dt=2024-01-15
+   *       → lockKey=partition_lock__data_hudi_table_b_dt=2024-01-15</li>
+   * </ul>
    *
    * @param writeConfig   Hudi write configs.
    * @param partitionPath Relative partition path.
@@ -95,9 +106,11 @@ public class PartitionDirectMarkerTransactionManager extends TransactionManager 
           + "Current lock provider: " + writeConfig.getLockProviderClass());
     }
     TypedProperties props = new TypedProperties(writeConfig.getProps());
-    String lockKey = (partitionPath != null && !partitionPath.isEmpty())
-        ? "partition_lock_" + partitionPath.replace("/", "_")
-        : "partition_lock_default";
+    // Use absolute partition path as lock key for cross-table isolation
+    String absolutePartitionPath = (partitionPath != null && !partitionPath.isEmpty())
+        ? writeConfig.getBasePath() + Path.SEPARATOR + partitionPath
+        : writeConfig.getBasePath();
+    String lockKey = "partition_lock_" + absolutePartitionPath.replaceAll("/|:", "_");
     props.setProperty(LockConfiguration.ZK_LOCK_KEY_PROP_KEY, lockKey);
     return props;
   }
