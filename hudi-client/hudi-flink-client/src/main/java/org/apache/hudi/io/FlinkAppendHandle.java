@@ -170,13 +170,16 @@ public class FlinkAppendHandle<T, I, K, O>
         }
         long maxAllowableHeartbeatIntervalInMs = config.getHoodieClientHeartbeatIntervalInMs()
             * config.getHoodieClientHeartbeatTolerableMisses();
+        String targetLogFileName = writer != null && writer.getLogFile() != null
+            ? writer.getLogFile().getFileName()
+            : fileId;
         boolean conflict = MarkerUtils.hasExpiredHeartbeatPartitionConflict(
             hoodieTable.getStorage(),
             config.getBasePath(),
             instantTime,
             maxAllowableHeartbeatIntervalInMs,
             partitionPath,
-            fileId);
+            targetLogFileName);
         if (conflict) {
           LOG.warn("Detected expired heartbeat partition conflict for partition: {}. "
               + "Rolling over to a new log file to prevent potential data corruption "
