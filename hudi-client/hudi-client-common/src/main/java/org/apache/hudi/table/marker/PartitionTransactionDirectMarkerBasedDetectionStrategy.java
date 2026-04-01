@@ -127,7 +127,7 @@ public class PartitionTransactionDirectMarkerBasedDetectionStrategy
         if (writeConfig.isExpiredHeartbeatPartitionConflictCheckEnabled()) {
           this.expiredHeartbeatPartitionConflictDetected =
               MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-                  storage, basePath, instantTime, maxAllowableHeartbeatIntervalInMs, partitionPath);
+                  storage, basePath, instantTime, maxAllowableHeartbeatIntervalInMs, partitionPath, fileId);
         }
         return;
       }

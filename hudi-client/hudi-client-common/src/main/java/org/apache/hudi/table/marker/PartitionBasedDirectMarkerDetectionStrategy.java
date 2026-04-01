@@ -21,6 +21,7 @@ package org.apache.hudi.table.marker;
 import org.apache.hudi.common.conflict.detection.DirectMarkerBasedDetectionStrategy;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
+import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.util.MarkerUtils;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieEarlyConflictDetectionException;
@@ -60,7 +61,7 @@ public class PartitionBasedDirectMarkerDetectionStrategy extends DirectMarkerBas
   private static final Logger LOG = LoggerFactory.getLogger(PartitionBasedDirectMarkerDetectionStrategy.class);
   protected final String basePath;
   private final boolean checkCommitConflict;
-  private final Set<String> completedCommitInstants;
+  private final Set<HoodieInstant> completedCommitInstants;
   protected final long maxAllowableHeartbeatIntervalInMs;
 
   public PartitionBasedDirectMarkerDetectionStrategy(HoodieStorage storage, String partitionPath, String fileId, String instantTime,
@@ -137,7 +138,7 @@ public class PartitionBasedDirectMarkerDetectionStrategy extends DirectMarkerBas
 
     // Expired heartbeat instants → partition-level conflict detection (same classification, zero extra heartbeat IO)
     this.expiredHeartbeatPartitionConflictDetected =
-        MarkerUtils.hasExpiredHeartbeatInPartition(storage, classification.expiredHeartbeatInstants, partitionPath);
+        MarkerUtils.hasExpiredHeartbeatInPartition(storage, classification.expiredHeartbeatInstants, partitionPath, fileId);
 
     if (hasPartitionConflict) {
       LOG.warn("Detected partition-level marker conflict for partition: " + partitionPath + " at instant " + instantTime);

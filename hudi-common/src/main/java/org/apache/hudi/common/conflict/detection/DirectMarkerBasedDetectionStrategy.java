@@ -142,7 +142,7 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
 
     // Expired heartbeat instants → partition-level conflict detection (same classification, zero extra heartbeat IO)
     this.expiredHeartbeatPartitionConflictDetected =
-        MarkerUtils.hasExpiredHeartbeatInPartition(storage, classification.expiredHeartbeatInstants, partitionPath);
+        MarkerUtils.hasExpiredHeartbeatInPartition(storage, classification.expiredHeartbeatInstants, partitionPath, fileId);
 
     if (res != 0L) {
       LOG.warn("Detected conflict marker files: " + partitionPath + "/" + fileId + " for " + instantTime);

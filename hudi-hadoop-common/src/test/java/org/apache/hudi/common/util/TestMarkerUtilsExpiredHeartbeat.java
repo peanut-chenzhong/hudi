@@ -93,14 +93,14 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
     // Remove the temp folder to simulate a fresh table
     String nonExistentBase = basePath + "/non_existent";
     assertFalse(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, nonExistentBase, "002", 60000L, "2023/01/01"));
+        storage, nonExistentBase, "002", 60000L, "2023/01/01", "dummy"));
   }
 
   @Test
   public void testNoConflict_NoOtherInstants() {
     // No other instant marker dirs exist
     assertFalse(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", 60000L, "2023/01/01"));
+        storage, basePath, "002", 60000L, "2023/01/01", "dummy"));
   }
 
   @Test
@@ -111,7 +111,7 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
 
     // Use a very large timeout so heartbeat is NOT expired
     assertFalse(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", Long.MAX_VALUE, "2023/01/01"));
+        storage, basePath, "002", Long.MAX_VALUE, "2023/01/01", "dummy"));
   }
 
   @Test
@@ -121,12 +121,12 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
     // No heartbeat file → getLastHeartbeatTime returns 0 → always expired
 
     assertTrue(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", 1L, "2023/01/02"),
+        storage, basePath, "002", 1L, "2023/01/02", "dummy"),
         "Should detect conflict in same partition");
 
     // Check different partition - should not conflict
     assertFalse(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", 1L, "2023/01/03"),
+        storage, basePath, "002", 1L, "2023/01/03", "dummy"),
         "Should not detect conflict in different partition");
   }
 
@@ -137,7 +137,7 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
     // No heartbeat file created → heartbeat time is 0 → expired with any timeout
 
     assertTrue(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", 1L, "2023/01/01"));
+        storage, basePath, "002", 1L, "2023/01/01", "dummy"));
   }
 
   @Test
@@ -147,7 +147,7 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
     // No heartbeat → expired
 
     assertFalse(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", 1L, "2023/01/01"),
+        storage, basePath, "002", 1L, "2023/01/01", "dummy"),
         "Should skip instants after current instant time");
   }
 
@@ -157,7 +157,7 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
     createMarkerDir("002", "2023/01/01");
 
     assertFalse(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", 1L, "2023/01/01"),
+        storage, basePath, "002", 1L, "2023/01/01", "dummy"),
         "Should skip current writer's own instant");
   }
 
@@ -181,7 +181,7 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
     // - 0001/00001 have no heartbeat → age = currentTimeMillis() ≈ 1.7e12 > 120000 → expired
     long twoMinutesMs = 120_000L;
     assertTrue(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", twoMinutesMs, "2023/01/01"),
+        storage, basePath, "002", twoMinutesMs, "2023/01/01", "dummy"),
         "Should detect conflict from expired heartbeat instant 00001 in same partition");
   }
 
@@ -193,7 +193,7 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
 
     // For empty partition path, we check the instant marker dir itself
     assertTrue(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", 1L, ""));
+        storage, basePath, "002", 1L, "", "dummy"));
   }
 
   // ====================================================================
@@ -222,7 +222,7 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
     assertTrue(result.activeHeartbeatInstants.isEmpty());
     assertTrue(result.expiredHeartbeatInstants.isEmpty());
     assertFalse(MarkerUtils.hasExpiredHeartbeatInPartition(
-        storage, result.expiredHeartbeatInstants, "2023/01/01"));
+        storage, result.expiredHeartbeatInstants, "2023/01/01", "dummy"));
   }
 
   @Test
@@ -235,7 +235,7 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
     // and HoodieActiveTimeline is needed, we use the simple original method to verify behavior
     // The classification should put 001 into activeHeartbeatInstants
     assertFalse(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", Long.MAX_VALUE, "2023/01/01"),
+        storage, basePath, "002", Long.MAX_VALUE, "2023/01/01", "dummy"),
         "Active heartbeat instant should not trigger expired conflict");
   }
 
@@ -245,7 +245,7 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
     // No heartbeat → expired
 
     assertTrue(MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", 1L, "2023/01/01"),
+        storage, basePath, "002", 1L, "2023/01/01", "dummy"),
         "Expired heartbeat instant should be detected as conflict");
   }
 
@@ -259,11 +259,11 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
 
     // 001 has markers in 2023/01/01 → conflict
     assertTrue(MarkerUtils.hasExpiredHeartbeatInPartition(
-        storage, expiredInstants, "2023/01/01"));
+        storage, expiredInstants, "2023/01/01", "dummy"));
 
     // No markers in 2023/01/03 → no conflict
     assertFalse(MarkerUtils.hasExpiredHeartbeatInPartition(
-        storage, expiredInstants, "2023/01/03"));
+        storage, expiredInstants, "2023/01/03", "dummy"));
   }
 
   @Test
@@ -281,7 +281,7 @@ class TestMarkerUtilsExpiredHeartbeat extends HoodieCommonTestHarness {
     // - 0001/00001 have no heartbeat → expired
     long twoMinutesMs = 120_000L;
     boolean resultOriginal = MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-        storage, basePath, "002", twoMinutesMs, "2023/01/01");
+        storage, basePath, "002", twoMinutesMs, "2023/01/01", "dummy");
     assertTrue(resultOriginal, "Should detect conflict from expired instant 00001");
   }
 }

@@ -175,7 +175,8 @@ public class FlinkAppendHandle<T, I, K, O>
             config.getBasePath(),
             instantTime,
             maxAllowableHeartbeatIntervalInMs,
-            partitionPath);
+            partitionPath,
+            fileId);
         if (conflict) {
           LOG.warn("Detected expired heartbeat partition conflict for partition: {}. "
               + "Rolling over to a new log file to prevent potential data corruption "
