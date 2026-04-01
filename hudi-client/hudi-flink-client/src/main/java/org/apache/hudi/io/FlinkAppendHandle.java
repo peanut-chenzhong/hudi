@@ -122,7 +122,13 @@ public class FlinkAppendHandle<T, I, K, O>
 
           // Try to create the marker
           WriteMarkers writeMarkers = WriteMarkersFactory.get(config.getMarkersType(), hoodieTable, instantTime);
-          Option<StoragePath> result = writeMarkers.createIfNotExists(partitionPath, logFileToAppend.getFileName(), IOType.APPEND);
+          Option<StoragePath> result = writeMarkers.createIfNotExists(
+              partitionPath,
+              logFileToAppend.getFileName(),
+              IOType.APPEND,
+              config,
+              fileId,
+              hoodieTable.getMetaClient().getActiveTimeline());
 
           if (result.isPresent()) {
             // Marker created successfully, record it
@@ -142,7 +148,13 @@ public class FlinkAppendHandle<T, I, K, O>
         // Just skip the marker creation if it already exists, the new data would append to
         // the file directly.
         WriteMarkers writeMarkers = WriteMarkersFactory.get(config.getMarkersType(), hoodieTable, instantTime);
-        writeMarkers.createIfNotExists(partitionPath, logFileToAppend.getFileName(), IOType.APPEND);
+        writeMarkers.createIfNotExists(
+            partitionPath,
+            logFileToAppend.getFileName(),
+            IOType.APPEND,
+            config,
+            fileId,
+            hoodieTable.getMetaClient().getActiveTimeline());
         return !hasExpiredHeartbeatPartitionConflict();
       }
 
