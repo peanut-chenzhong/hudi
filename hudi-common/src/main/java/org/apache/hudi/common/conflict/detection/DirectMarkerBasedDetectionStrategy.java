@@ -50,6 +50,7 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
   protected final HoodieStorage storage;
   protected final String partitionPath;
   protected final String fileId;
+  protected final String dataFileName;
   protected final String instantTime;
   protected final HoodieActiveTimeline activeTimeline;
   protected final HoodieConfig config;
@@ -62,11 +63,13 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
   protected boolean expiredHeartbeatPartitionConflictDetected = false;
 
   public DirectMarkerBasedDetectionStrategy(HoodieStorage storage, String partitionPath, String fileId,
+                                            String dataFileName,
                                             String instantTime,
                                             HoodieActiveTimeline activeTimeline, HoodieConfig config) {
     this.storage = storage;
     this.partitionPath = partitionPath;
     this.fileId = fileId;
+    this.dataFileName = dataFileName;
     this.instantTime = instantTime;
     this.activeTimeline = activeTimeline;
     this.config = config;
@@ -133,7 +136,17 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
           return Stream.empty();
         } else {
           return storage.listDirectEntries(markerPartitionPath).stream().parallel()
-              .filter((path) -> path.toString().contains(fileId));
+              .filter(StoragePathInfo::isFile)
+              .map(StoragePathInfo::getPath)
+              .filter(path -> {
+                String markerName = path.getName();
+                int markerSuffixIndex = markerName.indexOf(HoodieTableMetaClient.MARKER_EXTN);
+                if (markerSuffixIndex <= 0) {
+                  return false;
+                }
+                String markerDataFileName = markerName.substring(0, markerSuffixIndex);
+                return markerDataFileName.equals(dataFileName);
+              });
         }
       } catch (IOException e) {
         throw new HoodieIOException("IOException occurs during checking marker file conflict");
@@ -142,10 +155,10 @@ public abstract class DirectMarkerBasedDetectionStrategy implements EarlyConflic
 
     // Expired heartbeat instants → partition-level conflict detection (same classification, zero extra heartbeat IO)
     this.expiredHeartbeatPartitionConflictDetected =
-        MarkerUtils.hasExpiredHeartbeatInPartition(storage, classification.expiredHeartbeatInstants, partitionPath, fileId);
+        MarkerUtils.hasExpiredHeartbeatInPartition(storage, classification.expiredHeartbeatInstants, partitionPath, dataFileName);
 
     if (res != 0L) {
-      LOG.warn("Detected conflict marker files: " + partitionPath + "/" + fileId + " for " + instantTime);
+      LOG.warn("Detected conflict marker files: " + partitionPath + "/" + dataFileName + " for " + instantTime);
       return true;
     }
     return false;

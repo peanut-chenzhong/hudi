@@ -409,14 +409,14 @@ public class MarkerUtils {
    * @param storage                 {@link HoodieStorage} instance.
    * @param expiredHeartbeatInstants Instant paths that have expired heartbeats.
    * @param partitionPath           Partition path to check for conflicts.
-   * @param targetDataFileNameOrFileId Target data file name (preferred) or file ID for compatibility.
+   * @param targetDataFileName       Target data file name to check conflict against.
    * @return {@code true} if an expired-heartbeat writer has markers for the same target file.
    */
   public static boolean hasExpiredHeartbeatInPartition(
       HoodieStorage storage,
       List<StoragePath> expiredHeartbeatInstants,
       String partitionPath,
-      String targetDataFileNameOrFileId) {
+      String targetDataFileName) {
     for (StoragePath instantPath : expiredHeartbeatInstants) {
       StoragePath markerPartitionPath;
       if (StringUtils.isNullOrEmpty(partitionPath)) {
@@ -431,13 +431,13 @@ public class MarkerUtils {
           boolean fileLevelConflict = markers.stream()
               .filter(StoragePathInfo::isFile)
               .map(StoragePathInfo::getPath)
-              .anyMatch(markerPath -> isSameMarkerFile(markerPath, targetDataFileNameOrFileId));
+              .anyMatch(markerPath -> isSameMarkerFile(markerPath, targetDataFileName));
           if (fileLevelConflict) {
             String instantTime = markerDirToInstantTime(instantPath.toString());
             LOG.warn("Detected expired heartbeat writer {} with file-level conflict in partition: {}, target: {}. "
                     + "The writer may be 'falsely dead' and still actively writing. "
                     + "Current writer should rollover to a new log file to avoid potential data corruption.",
-                instantTime, partitionPath, targetDataFileNameOrFileId);
+                instantTime, partitionPath, targetDataFileName);
             return true;
           }
         }
@@ -448,7 +448,7 @@ public class MarkerUtils {
     return false;
   }
 
-  private static boolean isSameMarkerFile(StoragePath markerPath, String targetDataFileNameOrFileId) {
+  private static boolean isSameMarkerFile(StoragePath markerPath, String targetDataFileName) {
     String markerName = markerPath.getName();
     int markerSuffixIndex = markerName.indexOf(HoodieTableMetaClient.MARKER_EXTN);
     if (markerSuffixIndex <= 0) {
@@ -456,18 +456,7 @@ public class MarkerUtils {
     }
 
     String dataFileName = markerName.substring(0, markerSuffixIndex);
-    // Prefer exact data file name match to avoid repeated rollovers when the same fileId
-    // rolls over to different physical log file names.
-    if (dataFileName.equals(targetDataFileNameOrFileId)) {
-      return true;
-    }
-    try {
-      String markerFileId = FSUtils.getFileIdFromFilePath(new StoragePath(dataFileName));
-      return markerFileId.equals(targetDataFileNameOrFileId);
-    } catch (Exception e) {
-      // Fallback for non-standard file names in tests or custom environments.
-      return dataFileName.contains(targetDataFileNameOrFileId);
-    }
+    return dataFileName.equals(targetDataFileName);
   }
 
   /**
@@ -514,7 +503,7 @@ public class MarkerUtils {
    * @param currentInstantTime                Current writer's instant time.
    * @param maxAllowableHeartbeatIntervalInMs Heartbeat timeout in milliseconds.
    * @param partitionPath                     Partition path to check for conflicts.
-   * @param targetDataFileNameOrFileId        Target data file name (preferred) or file ID for compatibility.
+   * @param targetDataFileName                 Target data file name.
    * @return {@code true} if an expired-heartbeat writer has markers for the same target file;
    *         {@code false} otherwise.
    */
@@ -524,7 +513,7 @@ public class MarkerUtils {
       String currentInstantTime,
       long maxAllowableHeartbeatIntervalInMs,
       String partitionPath,
-      String targetDataFileNameOrFileId) {
+      String targetDataFileName) {
     try {
       String tempFolderPath = basePath + StoragePath.SEPARATOR + HoodieTableMetaClient.TEMPFOLDER_NAME;
       StoragePath tempPath = new StoragePath(tempFolderPath);
@@ -552,7 +541,7 @@ public class MarkerUtils {
         }
       }
 
-      return hasExpiredHeartbeatInPartition(storage, expiredInstants, partitionPath, targetDataFileNameOrFileId);
+      return hasExpiredHeartbeatInPartition(storage, expiredInstants, partitionPath, targetDataFileName);
     } catch (IOException e) {
       LOG.warn("Error checking expired heartbeat partition conflict for partition: " + partitionPath, e);
       return false;

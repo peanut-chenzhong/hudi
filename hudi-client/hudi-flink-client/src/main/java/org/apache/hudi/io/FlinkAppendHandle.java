@@ -117,7 +117,7 @@ public class FlinkAppendHandle<T, I, K, O>
           // Check if marker was created by this task instance in a previous batch
           if (createdMarkers.contains(markerKey)) {
             LOG.debug("Marker already created by this task instance, continue appending: {}", markerKey);
-            return !hasExpiredHeartbeatPartitionConflict();
+            return !hasExpiredHeartbeatPartitionConflict(logFileToAppend);
           }
 
           // Try to create the marker
@@ -134,7 +134,7 @@ public class FlinkAppendHandle<T, I, K, O>
             // Marker created successfully, record it
             createdMarkers.add(markerKey);
             LOG.info("Marker created successfully for task retry protection: {}", markerKey);
-            return !hasExpiredHeartbeatPartitionConflict();
+            return !hasExpiredHeartbeatPartitionConflict(logFileToAppend);
           } else {
             // Marker already exists but not created by this task instance
             // This means another task attempt (e.g., the "zombie" original task) created it
@@ -155,7 +155,7 @@ public class FlinkAppendHandle<T, I, K, O>
             config,
             fileId,
             hoodieTable.getMetaClient().getActiveTimeline());
-        return !hasExpiredHeartbeatPartitionConflict();
+        return !hasExpiredHeartbeatPartitionConflict(logFileToAppend);
       }
 
       /**
@@ -164,22 +164,19 @@ public class FlinkAppendHandle<T, I, K, O>
        * it might be "falsely dead" (heartbeat expired but task still running).
        * Returns true if conflict detected and rollover is needed.
        */
-      private boolean hasExpiredHeartbeatPartitionConflict() {
+      private boolean hasExpiredHeartbeatPartitionConflict(HoodieLogFile logFileToAppend) {
         if (!config.isExpiredHeartbeatPartitionConflictCheckEnabled()) {
           return false;
         }
         long maxAllowableHeartbeatIntervalInMs = config.getHoodieClientHeartbeatIntervalInMs()
             * config.getHoodieClientHeartbeatTolerableMisses();
-        String targetLogFileName = writer != null && writer.getLogFile() != null
-            ? writer.getLogFile().getFileName()
-            : fileId;
         boolean conflict = MarkerUtils.hasExpiredHeartbeatPartitionConflict(
             hoodieTable.getStorage(),
             config.getBasePath(),
             instantTime,
             maxAllowableHeartbeatIntervalInMs,
             partitionPath,
-            targetLogFileName);
+            logFileToAppend.getFileName());
         if (conflict) {
           LOG.warn("Detected expired heartbeat partition conflict for partition: {}. "
               + "Rolling over to a new log file to prevent potential data corruption "

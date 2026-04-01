@@ -50,9 +50,9 @@ public class SimpleDirectMarkerBasedDetectionStrategy extends DirectMarkerBasedD
   private final Set<HoodieInstant> completedCommitInstants;
   private final long maxAllowableHeartbeatIntervalInMs;
 
-  public SimpleDirectMarkerBasedDetectionStrategy(HoodieStorage storage, String partitionPath, String fileId, String instantTime,
+  public SimpleDirectMarkerBasedDetectionStrategy(HoodieStorage storage, String partitionPath, String fileId, String dataFileName, String instantTime,
                                                   HoodieActiveTimeline activeTimeline, HoodieWriteConfig config) {
-    super(storage, partitionPath, fileId, instantTime, activeTimeline, config);
+    super(storage, partitionPath, fileId, dataFileName, instantTime, activeTimeline, config);
     this.basePath = config.getBasePath();
     this.checkCommitConflict = config.earlyConflictDetectionCheckCommitConflict();
     this.completedCommitInstants = new HashSet<>(activeTimeline.getCommitsTimeline().filterCompletedInstants().getInstants());

@@ -40,9 +40,9 @@ public class SimpleTransactionDirectMarkerBasedDetectionStrategy
       SimpleTransactionDirectMarkerBasedDetectionStrategy.class);
 
   public SimpleTransactionDirectMarkerBasedDetectionStrategy(
-      HoodieStorage storage, String partitionPath, String fileId, String instantTime,
+      HoodieStorage storage, String partitionPath, String fileId, String dataFileName, String instantTime,
       HoodieActiveTimeline activeTimeline, HoodieWriteConfig config) {
-    super(storage, partitionPath, fileId, instantTime, activeTimeline, config);
+    super(storage, partitionPath, fileId, dataFileName, instantTime, activeTimeline, config);
   }
 
   @Override

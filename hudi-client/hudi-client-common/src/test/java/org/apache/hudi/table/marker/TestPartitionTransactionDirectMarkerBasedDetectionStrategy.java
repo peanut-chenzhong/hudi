@@ -74,6 +74,7 @@ public class TestPartitionTransactionDirectMarkerBasedDetectionStrategy extends 
     String currentInstant = "001";
     String partition = "2024/01";
     String fileId = "file-a";
+    String dataFileName = fileId + "-001.parquet";
     
     // Create config with non-ZK lock provider
     HoodieWriteConfig config = mock(HoodieWriteConfig.class);
@@ -89,7 +90,7 @@ public class TestPartitionTransactionDirectMarkerBasedDetectionStrategy extends 
     
     PartitionTransactionDirectMarkerBasedDetectionStrategy strategy = 
         new PartitionTransactionDirectMarkerBasedDetectionStrategy(
-            storage, partition, fileId, currentInstant, activeTimeline, config);
+            storage, partition, fileId, dataFileName, currentInstant, activeTimeline, config);
     
     // Should throw HoodieNotSupportedException because only ZK lock is supported
     assertThrows(HoodieNotSupportedException.class, () -> {

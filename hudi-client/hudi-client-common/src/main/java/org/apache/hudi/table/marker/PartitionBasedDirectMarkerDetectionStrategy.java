@@ -64,9 +64,9 @@ public class PartitionBasedDirectMarkerDetectionStrategy extends DirectMarkerBas
   private final Set<HoodieInstant> completedCommitInstants;
   protected final long maxAllowableHeartbeatIntervalInMs;
 
-  public PartitionBasedDirectMarkerDetectionStrategy(HoodieStorage storage, String partitionPath, String fileId, String instantTime,
+  public PartitionBasedDirectMarkerDetectionStrategy(HoodieStorage storage, String partitionPath, String fileId, String dataFileName, String instantTime,
                                                   HoodieActiveTimeline activeTimeline, HoodieWriteConfig config) {
-    super(storage, partitionPath, fileId, instantTime, activeTimeline, config);
+    super(storage, partitionPath, fileId, dataFileName, instantTime, activeTimeline, config);
     this.basePath = config.getBasePath();
     this.checkCommitConflict = config.earlyConflictDetectionCheckCommitConflict();
     this.completedCommitInstants = new HashSet<>(activeTimeline.getCommitsTimeline().filterCompletedInstants().getInstants());
@@ -138,7 +138,7 @@ public class PartitionBasedDirectMarkerDetectionStrategy extends DirectMarkerBas
 
     // Expired heartbeat instants → partition-level conflict detection (same classification, zero extra heartbeat IO)
     this.expiredHeartbeatPartitionConflictDetected =
-        MarkerUtils.hasExpiredHeartbeatInPartition(storage, classification.expiredHeartbeatInstants, partitionPath, fileId);
+        MarkerUtils.hasExpiredHeartbeatInPartition(storage, classification.expiredHeartbeatInstants, partitionPath, dataFileName);
 
     if (hasPartitionConflict) {
       LOG.warn("Detected partition-level marker conflict for partition: " + partitionPath + " at instant " + instantTime);

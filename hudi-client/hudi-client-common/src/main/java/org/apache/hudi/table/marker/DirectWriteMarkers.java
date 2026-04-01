@@ -235,9 +235,9 @@ public class DirectWriteMarkers extends WriteMarkers {
     }
     DirectMarkerBasedDetectionStrategy strategy =
         (DirectMarkerBasedDetectionStrategy) ReflectionUtils.loadClass(strategyClassName,
-            new Class<?>[] {HoodieStorage.class, String.class, String.class, String.class,
+            new Class<?>[] {HoodieStorage.class, String.class, String.class, String.class, String.class,
                 HoodieActiveTimeline.class, HoodieWriteConfig.class},
-            storage, partitionPath, fileId, instantTime, activeTimeline, config);
+            storage, partitionPath, fileId, dataFileName, instantTime, activeTimeline, config);
 
     strategy.detectAndResolveConflictIfNecessary();
 

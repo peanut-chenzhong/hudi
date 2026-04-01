@@ -98,12 +98,13 @@ public class TestPartitionBasedDirectMarkerDetectionStrategy extends HoodieCommo
     String currentInstant = "002";
     String currentPartition = "2024/02";
     String currentFileId = "file-b";
+    String currentDataFileName = currentFileId + "-002.parquet";
     
     HoodieWriteConfig config = createMockConfig();
     HoodieActiveTimeline activeTimeline = metaClient.reloadActiveTimeline();
     
     PartitionBasedDirectMarkerDetectionStrategy strategy = new PartitionBasedDirectMarkerDetectionStrategy(
-        storage, currentPartition, currentFileId, currentInstant, activeTimeline, config);
+        storage, currentPartition, currentFileId, currentDataFileName, currentInstant, activeTimeline, config);
     
     // Should NOT detect conflict since partitions are different
     assertFalse(strategy.hasMarkerConflict(), 
@@ -134,12 +135,13 @@ public class TestPartitionBasedDirectMarkerDetectionStrategy extends HoodieCommo
     // Current instant 002 wants to write to the SAME partition
     String currentInstant = "002";
     String currentFileId = "file-b";  // Different file ID but same partition
+    String currentDataFileName = currentFileId + "-002.parquet";
     
     HoodieWriteConfig config = createMockConfig();
     HoodieActiveTimeline activeTimeline = metaClient.reloadActiveTimeline();
     
     PartitionBasedDirectMarkerDetectionStrategy strategy = new PartitionBasedDirectMarkerDetectionStrategy(
-        storage, partition, currentFileId, currentInstant, activeTimeline, config);
+        storage, partition, currentFileId, currentDataFileName, currentInstant, activeTimeline, config);
     
     // Should detect conflict since partitions are the same
     assertTrue(strategy.hasMarkerConflict(), 
@@ -154,12 +156,13 @@ public class TestPartitionBasedDirectMarkerDetectionStrategy extends HoodieCommo
     String currentInstant = "002";
     String partition = "2024/01";
     String fileId = "file-a";
+    String dataFileName = fileId + "-002.parquet";
     
     HoodieWriteConfig config = createMockConfig();
     HoodieActiveTimeline activeTimeline = metaClient.reloadActiveTimeline();
     
     PartitionBasedDirectMarkerDetectionStrategy strategy = new PartitionBasedDirectMarkerDetectionStrategy(
-        storage, partition, fileId, currentInstant, activeTimeline, config);
+        storage, partition, fileId, dataFileName, currentInstant, activeTimeline, config);
     
     assertThrows(HoodieEarlyConflictDetectionException.class, () -> {
       strategy.resolveMarkerConflict(basePath, partition, "file.parquet");
@@ -186,12 +189,13 @@ public class TestPartitionBasedDirectMarkerDetectionStrategy extends HoodieCommo
     String sparkInstant = "002";
     String sparkPartition = "partition_2024_02";
     String sparkFileId = "spark-file";
+    String sparkDataFileName = sparkFileId + "-002.parquet";
     
     HoodieWriteConfig config = createMockConfig();
     HoodieActiveTimeline activeTimeline = metaClient.reloadActiveTimeline();
     
     PartitionBasedDirectMarkerDetectionStrategy strategy = new PartitionBasedDirectMarkerDetectionStrategy(
-        storage, sparkPartition, sparkFileId, sparkInstant, activeTimeline, config);
+        storage, sparkPartition, sparkFileId, sparkDataFileName, sparkInstant, activeTimeline, config);
     
     // Should NOT detect conflict - Flink and Spark write to different partitions
     assertFalse(strategy.hasMarkerConflict(), 
@@ -227,12 +231,13 @@ public class TestPartitionBasedDirectMarkerDetectionStrategy extends HoodieCommo
     String currentInstant = "003";
     String currentPartition = "partitionC";
     String currentFileId = "file-c";
+    String currentDataFileName = currentFileId + "-003.parquet";
     
     HoodieWriteConfig config = createMockConfig();
     HoodieActiveTimeline activeTimeline = metaClient.reloadActiveTimeline();
     
     PartitionBasedDirectMarkerDetectionStrategy strategy = new PartitionBasedDirectMarkerDetectionStrategy(
-        storage, currentPartition, currentFileId, currentInstant, activeTimeline, config);
+        storage, currentPartition, currentFileId, currentDataFileName, currentInstant, activeTimeline, config);
     
     // Should NOT detect conflict - all partitions are different
     assertFalse(strategy.hasMarkerConflict(), 
@@ -247,12 +252,13 @@ public class TestPartitionBasedDirectMarkerDetectionStrategy extends HoodieCommo
     String currentInstant = "001";
     String partition = "2024/01";
     String fileId = "file-a";
+    String dataFileName = fileId + "-001.parquet";
     
     HoodieWriteConfig config = createMockConfig();
     HoodieActiveTimeline activeTimeline = metaClient.reloadActiveTimeline();
     
     PartitionBasedDirectMarkerDetectionStrategy strategy = new PartitionBasedDirectMarkerDetectionStrategy(
-        storage, partition, fileId, currentInstant, activeTimeline, config);
+        storage, partition, fileId, dataFileName, currentInstant, activeTimeline, config);
     
     // Should not throw exception when no conflict
     strategy.detectAndResolveConflictIfNecessary();
@@ -277,12 +283,13 @@ public class TestPartitionBasedDirectMarkerDetectionStrategy extends HoodieCommo
     // Current instant 002 wants to write to the SAME partition
     String currentInstant = "002";
     String fileId = "file-b";
+    String dataFileName = fileId + "-002.parquet";
     
     HoodieWriteConfig config = createMockConfig();
     HoodieActiveTimeline activeTimeline = metaClient.reloadActiveTimeline();
     
     PartitionBasedDirectMarkerDetectionStrategy strategy = new PartitionBasedDirectMarkerDetectionStrategy(
-        storage, partition, fileId, currentInstant, activeTimeline, config);
+        storage, partition, fileId, dataFileName, currentInstant, activeTimeline, config);
     
     // Should throw exception when conflict exists
     assertThrows(HoodieEarlyConflictDetectionException.class, () -> {

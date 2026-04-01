@@ -87,9 +87,9 @@ public class PartitionTransactionDirectMarkerBasedDetectionStrategy
   private final StoragePath markerPartitionDirPath;
 
   public PartitionTransactionDirectMarkerBasedDetectionStrategy(
-      HoodieStorage storage, String partitionPath, String fileId, String instantTime,
+      HoodieStorage storage, String partitionPath, String fileId, String dataFileName, String instantTime,
       HoodieActiveTimeline activeTimeline, HoodieWriteConfig config) {
-    super(storage, partitionPath, fileId, instantTime, activeTimeline, config);
+    super(storage, partitionPath, fileId, dataFileName, instantTime, activeTimeline, config);
     this.writeConfig = config;
     this.fs = (FileSystem) storage.getFileSystem();
     // Build the marker partition directory path: .temp/{instantTime}/{partitionPath}/
@@ -127,7 +127,7 @@ public class PartitionTransactionDirectMarkerBasedDetectionStrategy
         if (writeConfig.isExpiredHeartbeatPartitionConflictCheckEnabled()) {
           this.expiredHeartbeatPartitionConflictDetected =
               MarkerUtils.hasExpiredHeartbeatPartitionConflict(
-                  storage, basePath, instantTime, maxAllowableHeartbeatIntervalInMs, partitionPath, fileId);
+                  storage, basePath, instantTime, maxAllowableHeartbeatIntervalInMs, partitionPath, dataFileName);
         }
         return;
       }
