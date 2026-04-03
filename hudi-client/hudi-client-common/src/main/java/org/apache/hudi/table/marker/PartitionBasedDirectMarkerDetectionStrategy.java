@@ -80,8 +80,8 @@ public class PartitionBasedDirectMarkerDetectionStrategy extends DirectMarkerBas
       boolean markerConflict = checkPartitionMarkerConflict(basePath, maxAllowableHeartbeatIntervalInMs);
       
       // Optionally check commit conflicts at partition level
-      boolean commitConflict = checkCommitConflict && 
-          MarkerUtils.hasCommitConflict(activeTimeline, Stream.of(fileId).collect(Collectors.toSet()), completedCommitInstants);
+      boolean commitConflict = checkCommitConflict
+          && MarkerUtils.hasCommitConflict(activeTimeline, Stream.of(fileId).collect(Collectors.toSet()), completedCommitInstants);
       
       return markerConflict || commitConflict;
     } catch (IOException e) {
