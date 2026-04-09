@@ -19,6 +19,8 @@
 
 `hudi-examples-datagen` provides a configurable Spark Structured Streaming job that writes to many Hudi tables from one `spark-submit`.  
 It is designed for pressure testing, concurrency testing, and parameter benchmarking.
+The project is standalone (no Maven parent) and manages its own dependency versions in `pom.xml`.
+Current default dependency set in this project is **Spark 3.5.0 + Hudi 0.15.0 + Scala 2.12**.
 
 ## 1. Scope and Goals
 
@@ -49,12 +51,12 @@ Core implementation files:
 Build command:
 
 ```bash
-mvn -pl hudi-examples/hudi-examples-datagen -DskipTests package
+mvn -f hudi-examples/hudi-examples-datagen/pom.xml -DskipTests package
 ```
 
 Generated artifacts:
 
-- Job jar: `hudi-examples/hudi-examples-datagen/target/hudi-examples-datagen-0.15.0.jar`
+- Job jar: `hudi-examples/hudi-examples-datagen/target/hudi-examples-datagen-1.0.0-SNAPSHOT.jar`
 - Runtime dependencies: `hudi-examples/hudi-examples-datagen/target/lib/*`
 
 ---
@@ -217,7 +219,7 @@ spark-submit \
   --master yarn \
   --deploy-mode cluster \
   --jars hudi-examples/hudi-examples-datagen/target/lib/* \
-  hudi-examples/hudi-examples-datagen/target/hudi-examples-datagen-0.15.0.jar \
+  hudi-examples/hudi-examples-datagen/target/hudi-examples-datagen-1.0.0-SNAPSHOT.jar \
   --config /path/to/hudi-streaming-multi-table-writer-mor.properties
 ```
 
@@ -228,7 +230,7 @@ spark-submit \
   --class org.apache.hudi.examples.datagen.streaming.HudiStreamingMultiTableWriter \
   --master local[4] \
   --jars hudi-examples/hudi-examples-datagen/target/lib/* \
-  hudi-examples/hudi-examples-datagen/target/hudi-examples-datagen-0.15.0.jar \
+  hudi-examples/hudi-examples-datagen/target/hudi-examples-datagen-1.0.0-SNAPSHOT.jar \
   --config hudi-examples/hudi-examples-datagen/src/main/resources/hudi-streaming-multi-table-writer.properties
 ```
 
@@ -286,3 +288,65 @@ If invalid, job fails fast at startup with clear error.
   - tune `hoodie.parquet.small.file.limit`, parallelism, and commit frequency
 - Hive sync issues:
   - verify `hudi.option.hoodie.datasource.hive_sync.*` values and HMS endpoint reachability
+
+---
+
+## 13. Build as a Fully Standalone Project
+
+You can copy this module out of the Hudi monorepo and build it as an independent project.
+
+### 13.1 Minimal files to copy
+
+Copy the whole directory:
+
+- `hudi-examples/hudi-examples-datagen`
+
+Keep at least:
+
+- `pom.xml`
+- `src/main/java/**`
+- `src/main/resources/**`
+- `STREAMING_MULTI_TABLE_WRITER.md`
+
+### 13.2 Version knobs in standalone `pom.xml`
+
+The project is already parent-free. You only need to adjust these properties in `pom.xml`:
+
+- `hudi.version`
+- `spark.version`
+- `scala.binary.version`
+- `log4j.version`
+
+Recommended compatibility:
+
+- Spark 3.5.x + Hudi 0.15.0 -> use `hudi-spark3.5-bundle_${scala.binary.version}`
+- If you switch Spark minor version, align both:
+  - Spark dependency version (`spark.version`)
+  - Hudi spark bundle artifact name (`hudi-spark<spark-minor>-bundle_${scala.binary.version}`)
+
+### 13.3 Build commands (outside monorepo)
+
+```bash
+mvn -DskipTests compile
+mvn -DskipTests package
+```
+
+### 13.4 If local Maven repository is not writable
+
+If your default Maven repo path has permission issues, use an explicit writable local repo:
+
+```bash
+mvn -DskipTests package -Dmaven.repo.local=/path/to/writable-m2
+```
+
+### 13.5 spark-submit after standalone build
+
+```bash
+spark-submit \
+  --class org.apache.hudi.examples.datagen.streaming.HudiStreamingMultiTableWriter \
+  --master yarn \
+  --deploy-mode cluster \
+  --jars target/lib/* \
+  target/hudi-examples-datagen-1.0.0-SNAPSHOT.jar \
+  --config /path/to/hudi-streaming-multi-table-writer-mor.properties
+```

@@ -29,7 +29,6 @@
 
   <modules>
     <module>hudi-examples-common</module>
-    <module>hudi-examples-datagen</module>
     <module>hudi-examples-spark</module>
     <module>hudi-examples-flink</module>
     <module>hudi-examples-java</module>
