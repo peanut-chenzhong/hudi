@@ -138,6 +138,13 @@ Generated table checkpoint path:
 ### 4.4 Custom Hudi options passthrough
 
 Any property with prefix `hudi.option.` is forwarded to writer options after prefix removal.
+However, the following fields are always auto-derived per target table and user values are ignored:
+
+- `hoodie.table.name`
+- `hoodie.database.name`
+- `hoodie.datasource.hive_sync.database`
+- `hoodie.datasource.hive_sync.table`
+- `hoodie.datasource.hive_sync.partition_fields` (when partitioned table is enabled)
 
 Example:
 
@@ -292,7 +299,8 @@ If invalid, job fails fast at startup with clear error.
 - Too many small files:
   - tune `hoodie.parquet.small.file.limit`, parallelism, and commit frequency
 - Hive sync issues:
-  - verify `hudi.option.hoodie.datasource.hive_sync.*` values and HMS endpoint reachability
+  - do not configure `hudi.option.hoodie.datasource.hive_sync.database/table/partition_fields` manually
+  - verify HMS endpoint/network and generic hive sync switches (such as `enable`, `mode`)
 
 ---
 

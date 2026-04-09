@@ -161,6 +161,14 @@ public class StreamingJobConfig {
     }
 
     options.putAll(customHudiOptions);
+    // Always derive these from current target table instead of user overrides.
+    options.put("hoodie.table.name", tableTarget.getTableName());
+    options.put("hoodie.database.name", tableTarget.getDatabase());
+    options.put("hoodie.datasource.hive_sync.database", tableTarget.getDatabase());
+    options.put("hoodie.datasource.hive_sync.table", tableTarget.getTableName());
+    if (partitioned) {
+      options.put("hoodie.datasource.hive_sync.partition_fields", partitionField);
+    }
     return options;
   }
 
