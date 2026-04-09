@@ -83,6 +83,10 @@ Important behavior:
 ## 4. Configuration Reference
 
 Config format is Java `.properties`.
+`--config` supports:
+
+- HDFS path, for example: `hdfs:///path/to/hudi-streaming-multi-table-writer-mor.properties`
+- Local path, for example: `/opt/conf/hudi-streaming-multi-table-writer-mor.properties` or `D:/conf/...`
 
 Required keys:
 
@@ -281,6 +285,7 @@ If invalid, job fails fast at startup with clear error.
 - Job exits on startup:
   - check required keys (`table.base.path`, `checkpoint.base.path`)
   - check numeric ranges (`tables.max.concurrent.writes`, `ratio.insert`)
+  - if using HDFS config path, ensure NameNode URI and client configs are available in runtime environment
 - Throughput low:
   - increase `tables.max.concurrent.writes` carefully
   - tune Spark resources and Hudi write options

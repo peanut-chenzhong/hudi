@@ -20,6 +20,9 @@ package org.apache.hudi.examples.datagen.streaming;
 
 import org.apache.hudi.keygen.NonpartitionedKeyGenerator;
 import org.apache.hudi.keygen.SimpleKeyGenerator;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -28,6 +31,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
@@ -99,7 +103,7 @@ public class StreamingJobConfig {
 
   public static StreamingJobConfig fromFile(String configPath) throws IOException {
     Properties properties = new Properties();
-    try (InputStream inputStream = Files.newInputStream(Paths.get(configPath))) {
+    try (InputStream inputStream = openConfigInputStream(configPath)) {
       properties.load(inputStream);
     }
 
@@ -246,6 +250,21 @@ public class StreamingJobConfig {
       stripped = stripped.substring(0, stripped.length() - 1);
     }
     return stripped;
+  }
+
+  private static InputStream openConfigInputStream(String configPath) throws IOException {
+    String normalized = configPath.trim();
+    String lower = normalized.toLowerCase(Locale.ROOT);
+    if (lower.startsWith("hdfs://")) {
+      Configuration configuration = new Configuration();
+      Path hadoopPath = new Path(normalized);
+      FileSystem fileSystem = hadoopPath.getFileSystem(configuration);
+      return fileSystem.open(hadoopPath);
+    }
+    if (lower.startsWith("file://")) {
+      return Files.newInputStream(Paths.get(java.net.URI.create(normalized)));
+    }
+    return Files.newInputStream(Paths.get(normalized));
   }
 
   public static class TableTarget {
