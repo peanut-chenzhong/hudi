@@ -144,6 +144,7 @@ public abstract class AbstractHoodieLogRecordReader {
   private final List<String> validBlockInstants = new ArrayList<>();
   // Use scanV2 method.
   private final boolean enableOptimizedLogBlocksScan;
+  private final Option<PrecomputedTimelineState> precomputedTimelineStateOpt;
 
   protected AbstractHoodieLogRecordReader(HoodieStorage storage, String basePath, List<String> logFilePaths,
                                           Schema readerSchema, String latestInstantTime,
@@ -153,6 +154,7 @@ public abstract class AbstractHoodieLogRecordReader {
                                           InternalSchema internalSchema,
                                           Option<String> keyFieldOverride,
                                           boolean enableOptimizedLogBlocksScan,
+                                          Option<PrecomputedTimelineState> precomputedTimelineStateOpt,
                                           HoodieRecordMerger recordMerger,
                                           Option<HoodieTableMetaClient> hoodieTableMetaClientOption) {
     this.readerSchema = readerSchema;
@@ -182,6 +184,7 @@ public abstract class AbstractHoodieLogRecordReader {
     this.forceFullScan = forceFullScan;
     this.internalSchema = internalSchema == null ? InternalSchema.getEmptyInternalSchema() : internalSchema;
     this.enableOptimizedLogBlocksScan = enableOptimizedLogBlocksScan;
+    this.precomputedTimelineStateOpt = precomputedTimelineStateOpt;
 
     if (keyFieldOverride.isPresent()) {
       // NOTE: This branch specifically is leveraged handling Metadata Table
@@ -233,9 +236,13 @@ public abstract class AbstractHoodieLogRecordReader {
     totalLogBlocks = new AtomicLong(0);
     totalLogRecords = new AtomicLong(0);
     HoodieLogFormatReader logFormatReaderWrapper = null;
-    HoodieTimeline commitsTimeline = this.hoodieTableMetaClient.getCommitsTimeline();
-    HoodieTimeline completedInstantsTimeline = commitsTimeline.filterCompletedInstants();
-    HoodieTimeline inflightInstantsTimeline = commitsTimeline.filterInflights();
+    HoodieTimeline completedInstantsTimeline = null;
+    HoodieTimeline inflightInstantsTimeline = null;
+    if (!precomputedTimelineStateOpt.isPresent()) {
+      HoodieTimeline commitsTimeline = this.hoodieTableMetaClient.getCommitsTimeline();
+      completedInstantsTimeline = commitsTimeline.filterCompletedInstants();
+      inflightInstantsTimeline = commitsTimeline.filterInflights();
+    }
     try {
       // Iterate over the paths
       logFormatReaderWrapper = new HoodieLogFormatReader(storage,
@@ -261,8 +268,8 @@ public abstract class AbstractHoodieLogRecordReader {
           break;
         }
         if (logBlock.getBlockType() != CORRUPT_BLOCK && logBlock.getBlockType() != COMMAND_BLOCK) {
-          if (!completedInstantsTimeline.containsOrBeforeTimelineStarts(instantTime)
-              || inflightInstantsTimeline.containsInstant(instantTime)) {
+          if (!isCommitted(instantTime, completedInstantsTimeline)
+              || isInflight(instantTime, inflightInstantsTimeline)) {
             // hit an uncommitted block possibly from a failed write, move to the next one and skip processing this one
             continue;
           }
@@ -381,9 +388,13 @@ public abstract class AbstractHoodieLogRecordReader {
     totalLogBlocks = new AtomicLong(0);
     totalLogRecords = new AtomicLong(0);
     HoodieLogFormatReader logFormatReaderWrapper = null;
-    HoodieTimeline commitsTimeline = this.hoodieTableMetaClient.getCommitsTimeline();
-    HoodieTimeline completedInstantsTimeline = commitsTimeline.filterCompletedInstants();
-    HoodieTimeline inflightInstantsTimeline = commitsTimeline.filterInflights();
+    HoodieTimeline completedInstantsTimeline = null;
+    HoodieTimeline inflightInstantsTimeline = null;
+    if (!precomputedTimelineStateOpt.isPresent()) {
+      HoodieTimeline commitsTimeline = this.hoodieTableMetaClient.getCommitsTimeline();
+      completedInstantsTimeline = commitsTimeline.filterCompletedInstants();
+      inflightInstantsTimeline = commitsTimeline.filterInflights();
+    }
     try {
       // Iterate over the paths
       logFormatReaderWrapper = new HoodieLogFormatReader(storage,
@@ -456,8 +467,8 @@ public abstract class AbstractHoodieLogRecordReader {
           break;
         }
         if (logBlock.getBlockType() != COMMAND_BLOCK) {
-          if (!completedInstantsTimeline.containsOrBeforeTimelineStarts(instantTime)
-              || inflightInstantsTimeline.containsInstant(instantTime)) {
+          if (!isCommitted(instantTime, completedInstantsTimeline)
+              || isInflight(instantTime, inflightInstantsTimeline)) {
             // hit an uncommitted block possibly from a failed write, move to the next one and skip processing this one
             continue;
           }
@@ -679,6 +690,20 @@ public abstract class AbstractHoodieLogRecordReader {
     return !forceFullScan;
   }
 
+  private boolean isCommitted(String instantTime, HoodieTimeline completedInstantsTimeline) {
+    if (precomputedTimelineStateOpt.isPresent()) {
+      return precomputedTimelineStateOpt.get().containsCompletedInstantOrBeforeTimelineStarts(instantTime);
+    }
+    return completedInstantsTimeline.containsOrBeforeTimelineStarts(instantTime);
+  }
+
+  private boolean isInflight(String instantTime, HoodieTimeline inflightInstantsTimeline) {
+    if (precomputedTimelineStateOpt.isPresent()) {
+      return precomputedTimelineStateOpt.get().containsInflightInstant(instantTime);
+    }
+    return inflightInstantsTimeline.containsInstant(instantTime);
+  }
+
   /**
    * Return progress of scanning as a float between 0.0 to 1.0.
    */
@@ -877,6 +902,10 @@ public abstract class AbstractHoodieLogRecordReader {
     }
 
     public Builder withOptimizedLogBlocksScan(boolean enableOptimizedLogBlocksScan) {
+      throw new UnsupportedOperationException();
+    }
+
+    public Builder withPrecomputedTimelineState(Option<PrecomputedTimelineState> precomputedTimelineStateOpt) {
       throw new UnsupportedOperationException();
     }
 

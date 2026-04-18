@@ -23,6 +23,7 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.hadoop.InputSplitUtils;
 import org.apache.hudi.storage.StoragePath;
 
+import java.io.EOFException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.InputSplitWithLocationInfo;
 
@@ -30,7 +31,9 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -68,6 +71,8 @@ public interface RealtimeSplit extends InputSplitWithLocationInfo {
    */
   Option<HoodieVirtualKeyInfo> getVirtualKeyInfo();
 
+  Option<RealtimeSplitTimelineState> getRealtimeSplitTimelineState();
+
   /**
    * Returns the flag whether this split belongs to an Incremental Query
    */
@@ -91,6 +96,8 @@ public interface RealtimeSplit extends InputSplitWithLocationInfo {
   void setBelongsToIncrementalQuery(boolean belongsToIncrementalQuery);
 
   void setVirtualKeyInfo(Option<HoodieVirtualKeyInfo> virtualKeyInfo);
+
+  void setRealtimeSplitTimelineState(Option<RealtimeSplitTimelineState> realtimeSplitTimelineStateOpt);
 
   default void writeToOutput(DataOutput out) throws IOException {
     InputSplitUtils.writeString(getBasePath(), out);
@@ -116,6 +123,27 @@ public interface RealtimeSplit extends InputSplitWithLocationInfo {
         InputSplitUtils.writeString(String.valueOf(virtualKeyInfoOpt.get().getPartitionPathFieldIndex()), out);
       }
     }
+
+    Option<RealtimeSplitTimelineState> timelineStateOpt = getRealtimeSplitTimelineState();
+    if (!timelineStateOpt.isPresent()) {
+      InputSplitUtils.writeBoolean(false, out);
+      return;
+    }
+
+    InputSplitUtils.writeBoolean(true, out);
+    RealtimeSplitTimelineState timelineState = timelineStateOpt.get();
+    InputSplitUtils.writeBoolean(timelineState.getCompletedTimelineStartInstant() != null, out);
+    if (timelineState.getCompletedTimelineStartInstant() != null) {
+      InputSplitUtils.writeString(timelineState.getCompletedTimelineStartInstant(), out);
+    }
+    out.writeInt(timelineState.getCompletedInstants().size());
+    for (String instant : timelineState.getCompletedInstants()) {
+      InputSplitUtils.writeString(instant, out);
+    }
+    out.writeInt(timelineState.getInflightInstants().size());
+    for (String instant : timelineState.getInflightInstants()) {
+      InputSplitUtils.writeString(instant, out);
+    }
   }
 
   default void readFromInput(DataInput in) throws IOException {
@@ -140,6 +168,30 @@ public interface RealtimeSplit extends InputSplitWithLocationInfo {
       Option<String> partitionPathField = isPartitionPathFieldPresent ? Option.of(InputSplitUtils.readString(in)) : Option.empty();
       Option<Integer> partitionPathIndex = isPartitionPathFieldPresent ? Option.of(Integer.parseInt(InputSplitUtils.readString(in))) : Option.empty();
       setVirtualKeyInfo(Option.of(new HoodieVirtualKeyInfo(recordKeyField, partitionPathField, recordFieldIndex, partitionPathIndex)));
+    }
+
+    try {
+      boolean timelineStatePresent = InputSplitUtils.readBoolean(in);
+      if (!timelineStatePresent) {
+        setRealtimeSplitTimelineState(Option.empty());
+        return;
+      }
+
+      boolean timelineStartPresent = InputSplitUtils.readBoolean(in);
+      String timelineStart = timelineStartPresent ? InputSplitUtils.readString(in) : null;
+      int completedSize = in.readInt();
+      Set<String> completedInstants = new HashSet<>(completedSize);
+      for (int i = 0; i < completedSize; i++) {
+        completedInstants.add(InputSplitUtils.readString(in));
+      }
+      int inflightSize = in.readInt();
+      Set<String> inflightInstants = new HashSet<>(inflightSize);
+      for (int i = 0; i < inflightSize; i++) {
+        inflightInstants.add(InputSplitUtils.readString(in));
+      }
+      setRealtimeSplitTimelineState(Option.of(new RealtimeSplitTimelineState(timelineStart, completedInstants, inflightInstants)));
+    } catch (EOFException eofException) {
+      setRealtimeSplitTimelineState(Option.empty());
     }
   }
 

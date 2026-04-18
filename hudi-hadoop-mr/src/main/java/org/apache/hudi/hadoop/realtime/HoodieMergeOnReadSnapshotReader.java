@@ -172,6 +172,7 @@ public class HoodieMergeOnReadSnapshotReader extends AbstractRealtimeRecordReade
         logFilePaths,
         latestInstantTime,
         false, // TODO: Fix this to support incremental queries
+        Option.empty(),
         Option.empty());
     return HoodieInputFormatUtils.createRealtimeFileSplit(realtimePath, start, length, hosts);
   }
@@ -191,6 +192,7 @@ public class HoodieMergeOnReadSnapshotReader extends AbstractRealtimeRecordReade
         .withDiskMapType(jobConf.getEnum(SPILLABLE_DISK_MAP_TYPE.key(), SPILLABLE_DISK_MAP_TYPE.defaultValue()))
         .withBitCaskDiskMapCompressionEnabled(jobConf.getBoolean(DISK_MAP_BITCASK_COMPRESSION_ENABLED.key(), DISK_MAP_BITCASK_COMPRESSION_ENABLED.defaultValue()))
         .withOptimizedLogBlocksScan(jobConf.getBoolean(ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN, false))
+        .withPrecomputedTimelineState(getPrecomputedTimelineState())
         .withInternalSchema(schemaEvolutionContext.internalSchemaOption.orElse(getEmptyInternalSchema()))
         .build();
   }

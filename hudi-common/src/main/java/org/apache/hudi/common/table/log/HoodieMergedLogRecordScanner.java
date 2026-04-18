@@ -101,10 +101,13 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordReader
                                        Option<String> partitionName,
                                        InternalSchema internalSchema,
                                        Option<String> keyFieldOverride,
-                                       boolean enableOptimizedLogBlocksScan, HoodieRecordMerger recordMerger,
+                                       boolean enableOptimizedLogBlocksScan,
+                                       Option<PrecomputedTimelineState> precomputedTimelineStateOpt,
+                                       HoodieRecordMerger recordMerger,
                                       Option<HoodieTableMetaClient> hoodieTableMetaClientOption) {
     super(storage, basePath, logFilePaths, readerSchema, latestInstantTime, reverseReader, bufferSize,
-        instantRange, withOperationField, forceFullScan, partitionName, internalSchema, keyFieldOverride, enableOptimizedLogBlocksScan, recordMerger,
+        instantRange, withOperationField, forceFullScan, partitionName, internalSchema, keyFieldOverride,
+        enableOptimizedLogBlocksScan, precomputedTimelineStateOpt, recordMerger,
         hoodieTableMetaClientOption);
     try {
       this.maxMemorySizeInBytes = maxMemorySizeInBytes;
@@ -339,6 +342,7 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordReader
     // By default, we're doing a full-scan
     private boolean forceFullScan = true;
     private boolean enableOptimizedLogBlocksScan = false;
+    private Option<PrecomputedTimelineState> precomputedTimelineStateOpt = Option.empty();
     private HoodieRecordMerger recordMerger = HoodiePreCombineAvroRecordMerger.INSTANCE;
     protected HoodieTableMetaClient hoodieTableMetaClient;
 
@@ -436,6 +440,12 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordReader
     }
 
     @Override
+    public Builder withPrecomputedTimelineState(Option<PrecomputedTimelineState> precomputedTimelineStateOpt) {
+      this.precomputedTimelineStateOpt = precomputedTimelineStateOpt;
+      return this;
+    }
+
+    @Override
     public Builder withRecordMerger(HoodieRecordMerger recordMerger) {
       this.recordMerger = HoodieRecordUtils.mergerToPreCombineMode(recordMerger);
       return this;
@@ -469,7 +479,8 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordReader
           latestInstantTime, maxMemorySizeInBytes, reverseReader,
           bufferSize, spillableMapBasePath, instantRange,
           diskMapType, isBitCaskDiskMapCompressionEnabled, withOperationField, forceFullScan,
-          Option.ofNullable(partitionName), internalSchema, Option.ofNullable(keyFieldOverride), enableOptimizedLogBlocksScan, recordMerger,
+          Option.ofNullable(partitionName), internalSchema, Option.ofNullable(keyFieldOverride), enableOptimizedLogBlocksScan,
+          precomputedTimelineStateOpt, recordMerger,
           Option.ofNullable(hoodieTableMetaClient));
     }
   }

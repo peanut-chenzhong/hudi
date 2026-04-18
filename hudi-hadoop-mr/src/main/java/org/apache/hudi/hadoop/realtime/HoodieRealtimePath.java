@@ -53,6 +53,10 @@ public class HoodieRealtimePath extends Path {
    */
   private final Option<HoodieVirtualKeyInfo> virtualKeyInfo;
   /**
+   * Precomputed timeline state generated on driver side.
+   */
+  private final Option<RealtimeSplitTimelineState> realtimeSplitTimelineStateOpt;
+  /**
    * File status for the Bootstrap file (only relevant if this table is a bootstrapped table
    */
   private PathWithBootstrapFileStatus pathWithBootstrapFileStatus;
@@ -63,13 +67,15 @@ public class HoodieRealtimePath extends Path {
                             List<HoodieLogFile> deltaLogFiles,
                             String maxCommitTime,
                             boolean belongsToIncrementalQuery,
-                            Option<HoodieVirtualKeyInfo> virtualKeyInfo) {
+                            Option<HoodieVirtualKeyInfo> virtualKeyInfo,
+                            Option<RealtimeSplitTimelineState> realtimeSplitTimelineStateOpt) {
     super(parent, child);
     this.basePath = basePath;
     this.deltaLogFiles = deltaLogFiles;
     this.maxCommitTime = maxCommitTime;
     this.belongsToIncrementalQuery = belongsToIncrementalQuery;
     this.virtualKeyInfo = virtualKeyInfo;
+    this.realtimeSplitTimelineStateOpt = realtimeSplitTimelineStateOpt;
   }
 
   public List<HoodieLogFile> getDeltaLogFiles() {
@@ -106,5 +112,9 @@ public class HoodieRealtimePath extends Path {
 
   public Option<HoodieVirtualKeyInfo> getVirtualKeyInfo() {
     return virtualKeyInfo;
+  }
+
+  public Option<RealtimeSplitTimelineState> getRealtimeSplitTimelineState() {
+    return realtimeSplitTimelineStateOpt;
   }
 }

@@ -64,7 +64,7 @@ public class TestHoodieMergeOnReadTableInputFormat {
   void pathNotSplitableForBootstrapScenario() throws IOException {
     URI source = Files.createTempFile(tempDir, "source", ".parquet").toUri();
     URI target = Files.createTempFile(tempDir, "target", ".parquet").toUri();
-    HoodieRealtimePath rtPath = new HoodieRealtimePath(new Path("foo"), "bar", target.toString(), Collections.emptyList(), "000", false, Option.empty());
+    HoodieRealtimePath rtPath = new HoodieRealtimePath(new Path("foo"), "bar", target.toString(), Collections.emptyList(), "000", false, Option.empty(), Option.empty());
     assertTrue(new HoodieMergeOnReadTableInputFormat().isSplitable(fs, rtPath));
 
     PathWithBootstrapFileStatus path = new PathWithBootstrapFileStatus(new Path(target), fs.getFileStatus(new Path(source)));
@@ -75,12 +75,12 @@ public class TestHoodieMergeOnReadTableInputFormat {
   @Test
   void pathNotSplitableIfContainsDeltaFiles() throws IOException {
     URI basePath = Files.createTempFile(tempDir, "target", ".parquet").toUri();
-    HoodieRealtimePath rtPath = new HoodieRealtimePath(new Path("foo"), "bar", basePath.toString(), Collections.emptyList(), "000", false, Option.empty());
+    HoodieRealtimePath rtPath = new HoodieRealtimePath(new Path("foo"), "bar", basePath.toString(), Collections.emptyList(), "000", false, Option.empty(), Option.empty());
     assertTrue(new HoodieMergeOnReadTableInputFormat().isSplitable(fs, rtPath), "Path only contains the base file should be splittable");
 
     URI logPath = Files.createTempFile(tempDir, ".test", ".log.4_1-149-180").toUri();
     HoodieLogFile logFile = new HoodieLogFile(storage.getPathInfo(new StoragePath(logPath)));
-    rtPath = new HoodieRealtimePath(new Path("foo"), "bar", basePath.toString(), Collections.singletonList(logFile), "000", false, Option.empty());
+    rtPath = new HoodieRealtimePath(new Path("foo"), "bar", basePath.toString(), Collections.singletonList(logFile), "000", false, Option.empty(), Option.empty());
     assertFalse(new HoodieMergeOnReadTableInputFormat().isSplitable(fs, rtPath), "Path contains log files should not be splittable.");
   }
 }

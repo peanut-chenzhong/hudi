@@ -63,6 +63,10 @@ public class HoodieRealtimeFileSplit extends FileSplit implements RealtimeSplit 
    * Virtual key configuration of the table this split belongs to
    */
   private Option<HoodieVirtualKeyInfo> virtualKeyInfo = Option.empty();
+  /**
+   * Precomputed timeline state generated on driver side.
+   */
+  private Option<RealtimeSplitTimelineState> realtimeSplitTimelineStateOpt = Option.empty();
 
   public HoodieRealtimeFileSplit() {
   }
@@ -74,6 +78,7 @@ public class HoodieRealtimeFileSplit extends FileSplit implements RealtimeSplit 
         path.getMaxCommitTime(),
         path.getBelongsToIncrementalQuery(),
         path.getVirtualKeyInfo());
+    this.realtimeSplitTimelineStateOpt = path.getRealtimeSplitTimelineState();
   }
 
   /**
@@ -130,6 +135,11 @@ public class HoodieRealtimeFileSplit extends FileSplit implements RealtimeSplit 
   }
 
   @Override
+  public Option<RealtimeSplitTimelineState> getRealtimeSplitTimelineState() {
+    return realtimeSplitTimelineStateOpt;
+  }
+
+  @Override
   public boolean getBelongsToIncrementalQuery() {
     return belongsToIncrementalQuery;
   }
@@ -137,6 +147,11 @@ public class HoodieRealtimeFileSplit extends FileSplit implements RealtimeSplit 
   @Override
   public void setBelongsToIncrementalQuery(boolean belongsToIncrementalPath) {
     this.belongsToIncrementalQuery = belongsToIncrementalPath;
+  }
+
+  @Override
+  public void setRealtimeSplitTimelineState(Option<RealtimeSplitTimelineState> realtimeSplitTimelineStateOpt) {
+    this.realtimeSplitTimelineStateOpt = realtimeSplitTimelineStateOpt;
   }
 
   @Override

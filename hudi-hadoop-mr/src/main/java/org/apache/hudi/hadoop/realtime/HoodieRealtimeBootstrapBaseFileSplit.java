@@ -57,6 +57,10 @@ public class HoodieRealtimeBootstrapBaseFileSplit extends BootstrapBaseFileSplit
    * Virtual key configuration of the table this split belongs to
    */
   private Option<HoodieVirtualKeyInfo> virtualKeyInfo = Option.empty();
+  /**
+   * Precomputed timeline state generated on driver side.
+   */
+  private Option<RealtimeSplitTimelineState> realtimeSplitTimelineStateOpt = Option.empty();
 
   /**
    * NOTE: This ctor is necessary for Hive to be able to serialize and
@@ -117,6 +121,11 @@ public class HoodieRealtimeBootstrapBaseFileSplit extends BootstrapBaseFileSplit
   }
 
   @Override
+  public Option<RealtimeSplitTimelineState> getRealtimeSplitTimelineState() {
+    return realtimeSplitTimelineStateOpt;
+  }
+
+  @Override
   public boolean getBelongsToIncrementalQuery() {
     return belongsToIncrementalQuery;
   }
@@ -139,5 +148,10 @@ public class HoodieRealtimeBootstrapBaseFileSplit extends BootstrapBaseFileSplit
   @Override
   public void setVirtualKeyInfo(Option<HoodieVirtualKeyInfo> virtualKeyInfo) {
     this.virtualKeyInfo = virtualKeyInfo;
+  }
+
+  @Override
+  public void setRealtimeSplitTimelineState(Option<RealtimeSplitTimelineState> realtimeSplitTimelineStateOpt) {
+    this.realtimeSplitTimelineStateOpt = realtimeSplitTimelineStateOpt;
   }
 }

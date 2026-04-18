@@ -40,6 +40,7 @@ import org.apache.hudi.hadoop.HiveHoodieTableFileIndex;
 import org.apache.hudi.hadoop.HoodieCopyOnWriteTableInputFormat;
 import org.apache.hudi.hadoop.LocatedFileStatusWithBootstrapBaseFile;
 import org.apache.hudi.hadoop.RealtimeFileStatus;
+import org.apache.hudi.hadoop.config.HoodieRealtimeConfig;
 import org.apache.hudi.hadoop.fs.HadoopFSUtils;
 import org.apache.hudi.hadoop.utils.HoodieInputFormatUtils;
 import org.apache.hudi.hadoop.utils.HoodieRealtimeInputFormatUtils;
@@ -57,13 +58,17 @@ import org.apache.hadoop.mapred.InputSplit;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.SplitLocationInfo;
 import org.apache.hadoop.mapreduce.Job;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -83,12 +88,18 @@ import static org.apache.hudi.hadoop.utils.HoodieInputFormatUtils.createRealtime
  * NOTE: This class is invariant of the underlying file-format of the files being read
  */
 public class HoodieMergeOnReadTableInputFormat extends HoodieCopyOnWriteTableInputFormat implements Configurable {
+  private static final Logger LOG = LoggerFactory.getLogger(HoodieMergeOnReadTableInputFormat.class);
 
   @Override
   public InputSplit[] getSplits(JobConf job, int numSplits) throws IOException {
     List<FileSplit> fileSplits = Arrays.stream(super.getSplits(job, numSplits))
         .map(is -> (FileSplit) is)
         .collect(Collectors.toList());
+
+    if (job.getBoolean(HoodieRealtimeConfig.PRELOAD_SPLIT_TIMELINE_STATE,
+        HoodieRealtimeConfig.DEFAULT_PRELOAD_SPLIT_TIMELINE_STATE)) {
+      preloadTimelineStateToRealtimeSplits(job, fileSplits);
+    }
 
     return (containsIncrementalQuerySplits(fileSplits) ? filterIncrementalQueryFileSplits(fileSplits) : fileSplits)
         .toArray(new FileSplit[0]);
@@ -334,6 +345,42 @@ public class HoodieMergeOnReadTableInputFormat extends HoodieCopyOnWriteTableInp
   private static List<FileSplit> filterIncrementalQueryFileSplits(List<FileSplit> fileSplits) {
     return fileSplits.stream().filter(HoodieRealtimeInputFormatUtils::doesBelongToIncrementalQuery)
         .collect(Collectors.toList());
+  }
+
+  private static void preloadTimelineStateToRealtimeSplits(JobConf jobConf, List<FileSplit> fileSplits) {
+    Map<String, Option<RealtimeSplitTimelineState>> timelineStateByBasePath = new HashMap<>();
+    for (FileSplit fileSplit : fileSplits) {
+      if (!(fileSplit instanceof RealtimeSplit)) {
+        continue;
+      }
+
+      RealtimeSplit realtimeSplit = (RealtimeSplit) fileSplit;
+      String basePath = realtimeSplit.getBasePath();
+      Option<RealtimeSplitTimelineState> timelineStateOpt = timelineStateByBasePath.computeIfAbsent(
+          basePath, key -> loadRealtimeSplitTimelineState(jobConf, key));
+      realtimeSplit.setRealtimeSplitTimelineState(timelineStateOpt);
+    }
+  }
+
+  private static Option<RealtimeSplitTimelineState> loadRealtimeSplitTimelineState(JobConf jobConf, String basePath) {
+    try {
+      HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder()
+          .setConf(HadoopFSUtils.getStorageConfWithCopy(jobConf))
+          .setBasePath(basePath)
+          .build();
+      HoodieTimeline commitsTimeline = metaClient.getCommitsTimeline();
+      HoodieTimeline completedTimeline = commitsTimeline.filterCompletedInstants();
+      HoodieTimeline inflightTimeline = commitsTimeline.filterInflights();
+      String timelineStartInstant = completedTimeline.firstInstant().map(HoodieInstant::getTimestamp).orElse(null);
+      Set<String> completedInstants = completedTimeline.getInstantsAsStream()
+          .map(HoodieInstant::getTimestamp).collect(Collectors.toCollection(HashSet::new));
+      Set<String> inflightInstants = inflightTimeline.getInstantsAsStream()
+          .map(HoodieInstant::getTimestamp).collect(Collectors.toCollection(HashSet::new));
+      return Option.of(new RealtimeSplitTimelineState(timelineStartInstant, completedInstants, inflightInstants));
+    } catch (Exception e) {
+      LOG.warn("Failed to preload timeline state for base path {}, fallback to task-side timeline scan", basePath, e);
+      return Option.empty();
+    }
   }
 
   private static HoodieRealtimeBootstrapBaseFileSplit createRealtimeBootstrapBaseFileSplit(BootstrapBaseFileSplit split,

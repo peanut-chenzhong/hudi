@@ -24,6 +24,7 @@ import org.apache.hudi.common.model.HoodiePayloadProps;
 import org.apache.hudi.common.model.OverwriteWithLatestAvroPayload;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.TableSchemaResolver;
+import org.apache.hudi.common.table.log.PrecomputedTimelineState;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.hadoop.HoodieColumnProjectionUtils;
@@ -218,6 +219,14 @@ public abstract class AbstractRealtimeRecordReader {
 
   public JobConf getJobConf() {
     return jobConf;
+  }
+
+  protected Option<PrecomputedTimelineState> getPrecomputedTimelineState() {
+    return split.getRealtimeSplitTimelineState().map(timelineState ->
+        new PrecomputedTimelineState(
+            timelineState.getCompletedTimelineStartInstant(),
+            timelineState.getCompletedInstants(),
+            timelineState.getInflightInstants()));
   }
 
   public void setReaderSchema(Schema readerSchema) {

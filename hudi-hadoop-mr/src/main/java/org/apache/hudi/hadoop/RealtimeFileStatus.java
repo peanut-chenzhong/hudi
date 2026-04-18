@@ -23,6 +23,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.hadoop.realtime.HoodieRealtimePath;
+import org.apache.hudi.hadoop.realtime.RealtimeSplitTimelineState;
 import org.apache.hudi.hadoop.realtime.HoodieVirtualKeyInfo;
 
 import java.io.IOException;
@@ -60,6 +61,10 @@ public class RealtimeFileStatus extends FileStatus {
    * Virtual key configuration of the table this split belongs to
    */
   private final Option<HoodieVirtualKeyInfo> virtualKeyInfo;
+  /**
+   * Precomputed timeline state generated on driver side.
+   */
+  private Option<RealtimeSplitTimelineState> realtimeSplitTimelineStateOpt = Option.empty();
 
   public RealtimeFileStatus(FileStatus fileStatus,
                             String basePath,
@@ -78,7 +83,7 @@ public class RealtimeFileStatus extends FileStatus {
     Path path = super.getPath();
 
     HoodieRealtimePath realtimePath = new HoodieRealtimePath(path.getParent(), path.getName(), basePath,
-        deltaLogFiles, maxCommitTime, belongsToIncrementalQuery, virtualKeyInfo);
+        deltaLogFiles, maxCommitTime, belongsToIncrementalQuery, virtualKeyInfo, realtimeSplitTimelineStateOpt);
 
     if (bootStrapFileStatus != null) {
       realtimePath.setPathWithBootstrapFileStatus((PathWithBootstrapFileStatus)bootStrapFileStatus.getPath());
@@ -101,5 +106,9 @@ public class RealtimeFileStatus extends FileStatus {
 
   public void setBootStrapFileStatus(FileStatus bootStrapFileStatus) {
     this.bootStrapFileStatus = bootStrapFileStatus;
+  }
+
+  public void setRealtimeSplitTimelineState(Option<RealtimeSplitTimelineState> realtimeSplitTimelineStateOpt) {
+    this.realtimeSplitTimelineStateOpt = realtimeSplitTimelineStateOpt;
   }
 }

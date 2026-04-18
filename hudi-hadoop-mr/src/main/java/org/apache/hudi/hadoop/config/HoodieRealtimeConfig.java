@@ -43,4 +43,8 @@ public final class HoodieRealtimeConfig {
   public static final String DEFAULT_SPILLABLE_MAP_BASE_PATH = "/tmp/";
   public static final String ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN =
       "hoodie" + HoodieMetadataConfig.OPTIMIZED_LOG_BLOCKS_SCAN;
+
+  // Precompute timeline state on driver side and serialize to realtime splits.
+  public static final String PRELOAD_SPLIT_TIMELINE_STATE = "hoodie.realtime.split.timeline.preload.enabled";
+  public static final boolean DEFAULT_PRELOAD_SPLIT_TIMELINE_STATE = false;
 }
