@@ -12,6 +12,34 @@
 
 当同一个 map 任务内读取多个文件或 split 时，会出现重复 timeline 初始化，造成额外开销（CPU + 元数据读取）。
 
+### 1.1 修改前是否“每读一个 parquet 文件都读一次 timeline”
+
+在 MOR realtime 读取场景下，基本可以近似理解为“每个 realtime split 都会读一次 timeline”，而一个 realtime split 通常对应一个 base parquet 文件（或日志文件组）。
+
+因此在常见执行形态下，会观察到“每读一个 parquet 文件都加载一次 timeline”的现象。
+
+说明：
+
+- 这是 MOR realtime 路径中的行为，不是所有 Hudi 读取路径（例如 COW 纯 parquet 读取）都如此。
+- 在 combine split 等特殊执行形态下，粒度更准确是“每个 reader/split 实例一次”，本质仍是重复初始化。
+
+### 1.2 读取 timeline 的目的
+
+读取 timeline 不是冗余动作，它的核心目的是保证日志块可见性与快照一致性，避免脏读。
+
+Task 侧需要借助 timeline 回答：
+
+- 某个 log block 对应 instant 是否已 completed（可读）；
+- 是否处于 inflight（需要过滤）；
+- 是否满足当前查询的 instant 可见性边界。
+
+在代码语义上对应两类判断：
+
+- committed 判断：`containsOrBeforeTimelineStarts`
+- inflight 判断：`containsInstant`
+
+如果不做 timeline 判定，失败写入或未完成写入的日志块可能被误读，导致查询结果不一致。
+
 ## 2. 目标
 
 - 在 Driver 侧预计算 timeline 视图并随 split 下发到 Task。
