@@ -43,4 +43,11 @@ public final class HoodieRealtimeConfig {
   public static final String DEFAULT_SPILLABLE_MAP_BASE_PATH = "/tmp/";
   public static final String ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN =
       "hoodie" + HoodieMetadataConfig.OPTIMIZED_LOG_BLOCKS_SCAN;
+
+  // Cache timeline view in task JVM to avoid scanning timeline repeatedly per split/file.
+  public static final String ENABLE_TIMELINE_CACHE = "hoodie.realtime.reader.timeline.cache.enabled";
+  public static final boolean DEFAULT_ENABLE_TIMELINE_CACHE = true;
+  // 0 disables ttl-based refresh.
+  public static final String TIMELINE_CACHE_TTL_MS = "hoodie.realtime.reader.timeline.cache.ttl.ms";
+  public static final long DEFAULT_TIMELINE_CACHE_TTL_MS = 0L;
 }

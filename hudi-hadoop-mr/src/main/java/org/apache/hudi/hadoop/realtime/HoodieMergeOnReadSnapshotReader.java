@@ -50,10 +50,14 @@ import java.util.stream.Collectors;
 import static org.apache.hudi.common.config.HoodieCommonConfig.DISK_MAP_BITCASK_COMPRESSION_ENABLED;
 import static org.apache.hudi.common.config.HoodieCommonConfig.SPILLABLE_DISK_MAP_TYPE;
 import static org.apache.hudi.hadoop.config.HoodieRealtimeConfig.DEFAULT_MAX_DFS_STREAM_BUFFER_SIZE;
+import static org.apache.hudi.hadoop.config.HoodieRealtimeConfig.DEFAULT_ENABLE_TIMELINE_CACHE;
 import static org.apache.hudi.hadoop.config.HoodieRealtimeConfig.DEFAULT_SPILLABLE_MAP_BASE_PATH;
+import static org.apache.hudi.hadoop.config.HoodieRealtimeConfig.DEFAULT_TIMELINE_CACHE_TTL_MS;
+import static org.apache.hudi.hadoop.config.HoodieRealtimeConfig.ENABLE_TIMELINE_CACHE;
 import static org.apache.hudi.hadoop.config.HoodieRealtimeConfig.ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN;
 import static org.apache.hudi.hadoop.config.HoodieRealtimeConfig.MAX_DFS_STREAM_BUFFER_SIZE_PROP;
 import static org.apache.hudi.hadoop.config.HoodieRealtimeConfig.SPILLABLE_MAP_BASE_PATH_PROP;
+import static org.apache.hudi.hadoop.config.HoodieRealtimeConfig.TIMELINE_CACHE_TTL_MS;
 import static org.apache.hudi.hadoop.utils.HoodieRealtimeRecordReaderUtils.getBaseFileReader;
 import static org.apache.hudi.hadoop.utils.HoodieRealtimeRecordReaderUtils.getMaxCompactionMemoryInBytes;
 import static org.apache.hudi.internal.schema.InternalSchema.getEmptyInternalSchema;
@@ -191,6 +195,8 @@ public class HoodieMergeOnReadSnapshotReader extends AbstractRealtimeRecordReade
         .withDiskMapType(jobConf.getEnum(SPILLABLE_DISK_MAP_TYPE.key(), SPILLABLE_DISK_MAP_TYPE.defaultValue()))
         .withBitCaskDiskMapCompressionEnabled(jobConf.getBoolean(DISK_MAP_BITCASK_COMPRESSION_ENABLED.key(), DISK_MAP_BITCASK_COMPRESSION_ENABLED.defaultValue()))
         .withOptimizedLogBlocksScan(jobConf.getBoolean(ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN, false))
+        .withTimelineCacheEnabled(jobConf.getBoolean(ENABLE_TIMELINE_CACHE, DEFAULT_ENABLE_TIMELINE_CACHE))
+        .withTimelineCacheTtlMs(jobConf.getLong(TIMELINE_CACHE_TTL_MS, DEFAULT_TIMELINE_CACHE_TTL_MS))
         .withInternalSchema(schemaEvolutionContext.internalSchemaOption.orElse(getEmptyInternalSchema()))
         .build();
   }

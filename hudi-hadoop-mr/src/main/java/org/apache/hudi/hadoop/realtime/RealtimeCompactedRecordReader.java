@@ -98,6 +98,8 @@ public class RealtimeCompactedRecordReader extends AbstractRealtimeRecordReader
         .withBitCaskDiskMapCompressionEnabled(jobConf.getBoolean(HoodieCommonConfig.DISK_MAP_BITCASK_COMPRESSION_ENABLED.key(),
             HoodieCommonConfig.DISK_MAP_BITCASK_COMPRESSION_ENABLED.defaultValue()))
         .withOptimizedLogBlocksScan(jobConf.getBoolean(HoodieRealtimeConfig.ENABLE_OPTIMIZED_LOG_BLOCKS_SCAN, false))
+        .withTimelineCacheEnabled(jobConf.getBoolean(HoodieRealtimeConfig.ENABLE_TIMELINE_CACHE, HoodieRealtimeConfig.DEFAULT_ENABLE_TIMELINE_CACHE))
+        .withTimelineCacheTtlMs(jobConf.getLong(HoodieRealtimeConfig.TIMELINE_CACHE_TTL_MS, HoodieRealtimeConfig.DEFAULT_TIMELINE_CACHE_TTL_MS))
         .withInternalSchema(schemaEvolutionContext.internalSchemaOption.orElse(InternalSchema.getEmptyInternalSchema()))
         .build();
   }

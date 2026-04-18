@@ -83,7 +83,9 @@ class RealtimeUnmergedRecordReader extends AbstractRealtimeRecordReader
           .withReaderSchema(getReaderSchema())
           .withLatestInstantTime(split.getMaxCommitTime())
           .withReverseReader(false)
-          .withBufferSize(this.jobConf.getInt(HoodieRealtimeConfig.MAX_DFS_STREAM_BUFFER_SIZE_PROP, HoodieRealtimeConfig.DEFAULT_MAX_DFS_STREAM_BUFFER_SIZE));
+          .withBufferSize(this.jobConf.getInt(HoodieRealtimeConfig.MAX_DFS_STREAM_BUFFER_SIZE_PROP, HoodieRealtimeConfig.DEFAULT_MAX_DFS_STREAM_BUFFER_SIZE))
+          .withTimelineCacheEnabled(this.jobConf.getBoolean(HoodieRealtimeConfig.ENABLE_TIMELINE_CACHE, HoodieRealtimeConfig.DEFAULT_ENABLE_TIMELINE_CACHE))
+          .withTimelineCacheTtlMs(this.jobConf.getLong(HoodieRealtimeConfig.TIMELINE_CACHE_TTL_MS, HoodieRealtimeConfig.DEFAULT_TIMELINE_CACHE_TTL_MS));
 
     this.executor = new BoundedInMemoryExecutor<>(
         HoodieRealtimeRecordReaderUtils.getMaxCompactionMemoryInBytes(jobConf), getParallelProducers(scannerBuilder),

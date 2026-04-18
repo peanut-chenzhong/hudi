@@ -59,7 +59,10 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
@@ -87,6 +90,9 @@ import static org.apache.hudi.common.util.ValidationUtils.checkState;
 public abstract class AbstractHoodieLogRecordReader {
 
   private static final Logger LOG = LoggerFactory.getLogger(AbstractHoodieLogRecordReader.class);
+  private static final ConcurrentMap<TimelineCacheKey, TimelineCacheEntry> TIMELINE_CACHE = new ConcurrentHashMap<>();
+  private static final AtomicLong TIMELINE_CACHE_LOAD_COUNT = new AtomicLong(0);
+  private static final AtomicLong TIMELINE_CACHE_HIT_COUNT = new AtomicLong(0);
 
   // Reader schema for the records
   protected final Schema readerSchema;
@@ -144,6 +150,9 @@ public abstract class AbstractHoodieLogRecordReader {
   private final List<String> validBlockInstants = new ArrayList<>();
   // Use scanV2 method.
   private final boolean enableOptimizedLogBlocksScan;
+  private final TimelineCacheKey timelineCacheKey;
+  private final boolean timelineCacheEnabled;
+  private final long timelineCacheTtlMs;
 
   protected AbstractHoodieLogRecordReader(HoodieStorage storage, String basePath, List<String> logFilePaths,
                                           Schema readerSchema, String latestInstantTime,
@@ -153,6 +162,8 @@ public abstract class AbstractHoodieLogRecordReader {
                                           InternalSchema internalSchema,
                                           Option<String> keyFieldOverride,
                                           boolean enableOptimizedLogBlocksScan,
+                                          boolean timelineCacheEnabled,
+                                          long timelineCacheTtlMs,
                                           HoodieRecordMerger recordMerger,
                                           Option<HoodieTableMetaClient> hoodieTableMetaClientOption) {
     this.readerSchema = readerSchema;
@@ -182,6 +193,13 @@ public abstract class AbstractHoodieLogRecordReader {
     this.forceFullScan = forceFullScan;
     this.internalSchema = internalSchema == null ? InternalSchema.getEmptyInternalSchema() : internalSchema;
     this.enableOptimizedLogBlocksScan = enableOptimizedLogBlocksScan;
+    this.timelineCacheEnabled = timelineCacheEnabled;
+    this.timelineCacheTtlMs = timelineCacheTtlMs;
+    this.timelineCacheKey = new TimelineCacheKey(
+        basePath,
+        this.latestInstantTime,
+        buildInstantRangeCacheKey(this.instantRange),
+        this.hoodieTableMetaClient.getTimelineLayoutVersion().getVersion());
 
     if (keyFieldOverride.isPresent()) {
       // NOTE: This branch specifically is leveraged handling Metadata Table
@@ -233,9 +251,9 @@ public abstract class AbstractHoodieLogRecordReader {
     totalLogBlocks = new AtomicLong(0);
     totalLogRecords = new AtomicLong(0);
     HoodieLogFormatReader logFormatReaderWrapper = null;
-    HoodieTimeline commitsTimeline = this.hoodieTableMetaClient.getCommitsTimeline();
-    HoodieTimeline completedInstantsTimeline = commitsTimeline.filterCompletedInstants();
-    HoodieTimeline inflightInstantsTimeline = commitsTimeline.filterInflights();
+    TimelineView timelineView = loadTimelineView();
+    HoodieTimeline completedInstantsTimeline = timelineView.completedInstantsTimeline;
+    HoodieTimeline inflightInstantsTimeline = timelineView.inflightInstantsTimeline;
     try {
       // Iterate over the paths
       logFormatReaderWrapper = new HoodieLogFormatReader(storage,
@@ -381,9 +399,9 @@ public abstract class AbstractHoodieLogRecordReader {
     totalLogBlocks = new AtomicLong(0);
     totalLogRecords = new AtomicLong(0);
     HoodieLogFormatReader logFormatReaderWrapper = null;
-    HoodieTimeline commitsTimeline = this.hoodieTableMetaClient.getCommitsTimeline();
-    HoodieTimeline completedInstantsTimeline = commitsTimeline.filterCompletedInstants();
-    HoodieTimeline inflightInstantsTimeline = commitsTimeline.filterInflights();
+    TimelineView timelineView = loadTimelineView();
+    HoodieTimeline completedInstantsTimeline = timelineView.completedInstantsTimeline;
+    HoodieTimeline inflightInstantsTimeline = timelineView.inflightInstantsTimeline;
     try {
       // Iterate over the paths
       logFormatReaderWrapper = new HoodieLogFormatReader(storage,
@@ -782,6 +800,84 @@ public abstract class AbstractHoodieLogRecordReader {
     return validBlockInstants;
   }
 
+  private TimelineView loadTimelineView() {
+    if (!timelineCacheEnabled) {
+      return createTimelineView();
+    }
+
+    if (timelineCacheTtlMs <= 0) {
+      TimelineCacheEntry cachedEntry = TIMELINE_CACHE.get(timelineCacheKey);
+      if (cachedEntry != null) {
+        TIMELINE_CACHE_HIT_COUNT.incrementAndGet();
+        return cachedEntry.timelineView;
+      }
+      final boolean[] loadedFromMetaClient = new boolean[] {false};
+      TimelineCacheEntry loadedEntry = TIMELINE_CACHE.computeIfAbsent(
+          timelineCacheKey,
+          key -> {
+            loadedFromMetaClient[0] = true;
+            return new TimelineCacheEntry(createTimelineView(), System.currentTimeMillis());
+          });
+      if (!loadedFromMetaClient[0]) {
+        TIMELINE_CACHE_HIT_COUNT.incrementAndGet();
+      }
+      return loadedEntry.timelineView;
+    }
+
+    long currentTimeMs = System.currentTimeMillis();
+    TimelineCacheEntry cachedEntry = TIMELINE_CACHE.get(timelineCacheKey);
+    if (cachedEntry != null && !cachedEntry.isExpired(currentTimeMs, timelineCacheTtlMs)) {
+      TIMELINE_CACHE_HIT_COUNT.incrementAndGet();
+      return cachedEntry.timelineView;
+    }
+
+    final boolean[] usedCachedTimeline = new boolean[] {false};
+    TimelineCacheEntry refreshed = TIMELINE_CACHE.compute(timelineCacheKey, (key, existingEntry) -> {
+      long refreshTimeMs = System.currentTimeMillis();
+      if (existingEntry != null && !existingEntry.isExpired(refreshTimeMs, timelineCacheTtlMs)) {
+        usedCachedTimeline[0] = true;
+        return existingEntry;
+      }
+      return new TimelineCacheEntry(createTimelineView(), refreshTimeMs);
+    });
+    if (usedCachedTimeline[0]) {
+      TIMELINE_CACHE_HIT_COUNT.incrementAndGet();
+    }
+    return refreshed.timelineView;
+  }
+
+  private TimelineView createTimelineView() {
+    TIMELINE_CACHE_LOAD_COUNT.incrementAndGet();
+    HoodieTimeline commitsTimeline = this.hoodieTableMetaClient.getCommitsTimeline();
+    return new TimelineView(commitsTimeline.filterCompletedInstants(), commitsTimeline.filterInflights());
+  }
+
+  private static String buildInstantRangeCacheKey(Option<InstantRange> instantRangeOpt) {
+    if (!instantRangeOpt.isPresent()) {
+      return "none";
+    }
+    InstantRange instantRange = instantRangeOpt.get();
+    String className = instantRange.getClass().getName();
+    if (className.endsWith("ExplicitMatchRange")) {
+      return className + "#" + System.identityHashCode(instantRange);
+    }
+    return className + "#" + instantRange.getStartInstant() + "#" + instantRange.getEndInstant();
+  }
+
+  static void resetTimelineCacheForTest() {
+    TIMELINE_CACHE.clear();
+    TIMELINE_CACHE_HIT_COUNT.set(0);
+    TIMELINE_CACHE_LOAD_COUNT.set(0);
+  }
+
+  static long getTimelineCacheLoadCountForTest() {
+    return TIMELINE_CACHE_LOAD_COUNT.get();
+  }
+
+  static long getTimelineCacheHitCountForTest() {
+    return TIMELINE_CACHE_HIT_COUNT.get();
+  }
+
   private Pair<ClosableIterator<HoodieRecord>, Schema> getRecordsIterator(
       HoodieDataBlock dataBlock, Option<KeySpec> keySpecOpt) throws IOException {
     ClosableIterator<HoodieRecord> blockRecordsIterator;
@@ -880,10 +976,76 @@ public abstract class AbstractHoodieLogRecordReader {
       throw new UnsupportedOperationException();
     }
 
+    public Builder withTimelineCacheEnabled(boolean timelineCacheEnabled) {
+      throw new UnsupportedOperationException();
+    }
+
+    public Builder withTimelineCacheTtlMs(long timelineCacheTtlMs) {
+      throw new UnsupportedOperationException();
+    }
+
     public Builder withTableMetaClient(HoodieTableMetaClient hoodieTableMetaClient) {
       throw new UnsupportedOperationException();
     }
 
     public abstract AbstractHoodieLogRecordReader build();
+  }
+
+  private static class TimelineView {
+    private final HoodieTimeline completedInstantsTimeline;
+    private final HoodieTimeline inflightInstantsTimeline;
+
+    private TimelineView(HoodieTimeline completedInstantsTimeline, HoodieTimeline inflightInstantsTimeline) {
+      this.completedInstantsTimeline = completedInstantsTimeline;
+      this.inflightInstantsTimeline = inflightInstantsTimeline;
+    }
+  }
+
+  private static class TimelineCacheEntry {
+    private final TimelineView timelineView;
+    private final long loadedAtMs;
+
+    private TimelineCacheEntry(TimelineView timelineView, long loadedAtMs) {
+      this.timelineView = timelineView;
+      this.loadedAtMs = loadedAtMs;
+    }
+
+    private boolean isExpired(long currentTimeMs, long ttlMs) {
+      return currentTimeMs - loadedAtMs >= ttlMs;
+    }
+  }
+
+  private static class TimelineCacheKey {
+    private final String basePath;
+    private final String latestInstantTime;
+    private final String instantRangeKey;
+    private final int timelineLayoutVersion;
+
+    private TimelineCacheKey(String basePath, String latestInstantTime, String instantRangeKey, int timelineLayoutVersion) {
+      this.basePath = basePath;
+      this.latestInstantTime = latestInstantTime;
+      this.instantRangeKey = instantRangeKey;
+      this.timelineLayoutVersion = timelineLayoutVersion;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (this == other) {
+        return true;
+      }
+      if (!(other instanceof TimelineCacheKey)) {
+        return false;
+      }
+      TimelineCacheKey that = (TimelineCacheKey) other;
+      return timelineLayoutVersion == that.timelineLayoutVersion
+          && Objects.equals(basePath, that.basePath)
+          && Objects.equals(latestInstantTime, that.latestInstantTime)
+          && Objects.equals(instantRangeKey, that.instantRangeKey);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(basePath, latestInstantTime, instantRangeKey, timelineLayoutVersion);
+    }
   }
 }

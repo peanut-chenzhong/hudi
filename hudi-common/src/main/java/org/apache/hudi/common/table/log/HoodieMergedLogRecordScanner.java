@@ -101,10 +101,12 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordReader
                                        Option<String> partitionName,
                                        InternalSchema internalSchema,
                                        Option<String> keyFieldOverride,
-                                       boolean enableOptimizedLogBlocksScan, HoodieRecordMerger recordMerger,
+                                       boolean enableOptimizedLogBlocksScan, boolean timelineCacheEnabled, long timelineCacheTtlMs,
+                                       HoodieRecordMerger recordMerger,
                                       Option<HoodieTableMetaClient> hoodieTableMetaClientOption) {
     super(storage, basePath, logFilePaths, readerSchema, latestInstantTime, reverseReader, bufferSize,
-        instantRange, withOperationField, forceFullScan, partitionName, internalSchema, keyFieldOverride, enableOptimizedLogBlocksScan, recordMerger,
+        instantRange, withOperationField, forceFullScan, partitionName, internalSchema, keyFieldOverride,
+        enableOptimizedLogBlocksScan, timelineCacheEnabled, timelineCacheTtlMs, recordMerger,
         hoodieTableMetaClientOption);
     try {
       this.maxMemorySizeInBytes = maxMemorySizeInBytes;
@@ -339,6 +341,8 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordReader
     // By default, we're doing a full-scan
     private boolean forceFullScan = true;
     private boolean enableOptimizedLogBlocksScan = false;
+    private boolean timelineCacheEnabled = true;
+    private long timelineCacheTtlMs = 0L;
     private HoodieRecordMerger recordMerger = HoodiePreCombineAvroRecordMerger.INSTANCE;
     protected HoodieTableMetaClient hoodieTableMetaClient;
 
@@ -436,6 +440,18 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordReader
     }
 
     @Override
+    public Builder withTimelineCacheEnabled(boolean timelineCacheEnabled) {
+      this.timelineCacheEnabled = timelineCacheEnabled;
+      return this;
+    }
+
+    @Override
+    public Builder withTimelineCacheTtlMs(long timelineCacheTtlMs) {
+      this.timelineCacheTtlMs = timelineCacheTtlMs;
+      return this;
+    }
+
+    @Override
     public Builder withRecordMerger(HoodieRecordMerger recordMerger) {
       this.recordMerger = HoodieRecordUtils.mergerToPreCombineMode(recordMerger);
       return this;
@@ -469,7 +485,8 @@ public class HoodieMergedLogRecordScanner extends AbstractHoodieLogRecordReader
           latestInstantTime, maxMemorySizeInBytes, reverseReader,
           bufferSize, spillableMapBasePath, instantRange,
           diskMapType, isBitCaskDiskMapCompressionEnabled, withOperationField, forceFullScan,
-          Option.ofNullable(partitionName), internalSchema, Option.ofNullable(keyFieldOverride), enableOptimizedLogBlocksScan, recordMerger,
+          Option.ofNullable(partitionName), internalSchema, Option.ofNullable(keyFieldOverride), enableOptimizedLogBlocksScan,
+          timelineCacheEnabled, timelineCacheTtlMs, recordMerger,
           Option.ofNullable(hoodieTableMetaClient));
     }
   }
