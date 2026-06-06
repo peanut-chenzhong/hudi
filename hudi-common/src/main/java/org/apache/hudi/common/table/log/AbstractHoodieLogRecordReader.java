@@ -172,6 +172,7 @@ public abstract class AbstractHoodieLogRecordReader {
     if (this.preCombineField != null) {
       props.setProperty(HoodiePayloadProps.PAYLOAD_ORDERING_FIELD_PROP_KEY, this.preCombineField);
     }
+    props.setProperty(HoodieTableConfig.HOODIE_TABLE_NAME_KEY, tableConfig.getTableName());
     this.payloadProps = props;
     this.recordMerger = recordMerger;
     this.totalLogFiles.addAndGet(logFilePaths.size());
