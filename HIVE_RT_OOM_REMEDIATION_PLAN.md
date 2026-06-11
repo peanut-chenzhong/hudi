@@ -135,6 +135,18 @@
 4. 结束时输出 `logOnlyKeys = logAllKeysSet - matchedBaseKeysSet`；
 5. 对 `logOnlyKeys` 再按 segment 批量 `scanByFullKeys` 拉取 value 并输出，避免全量 value scan。
 
+### 退化方案实现成本说明（新增）
+
+当前 `AbstractHoodieLogRecordReader` 流程是 inflate -> deserialize -> processNextRecord 一体化，
+默认不具备“仅提取 key 不 materialize value”的直通能力。要落地 key-only 退化路径，需要：
+
+1. 在 `processDataBlock` 引入 keyOnly 模式；
+2. 在 block reader 侧新增仅解析 recordKey 的快速路径；
+3. 避免构造完整 payload/value 对象。
+
+该退化方案改动量中等偏高，建议作为次优先实现；P0 阶段优先使用
+log block header / key 索引能力（若已可用）完成 log-only key 发现。
+
 ### 改动点
 
 - `hudi-hadoop-mr/.../SegmentedRealtimeCompactedRecordReader.java`
@@ -142,7 +154,7 @@
 
 ---
 
-## 4.4 P0-4：消除 `deltaRecordKeys` 冗余拷贝
+## 4.4 P0-4：消除 `deltaRecordKeys` 冗余拷贝（并入 PR-2）
 
 ### 问题
 
@@ -153,6 +165,11 @@ legacy 路径中 `deltaRecordKeys = new HashSet<>(deltaRecordMap.keySet())` 会�
 1. 分段重构中不再维护全局 `deltaRecordKeys` 副本；
 2. 优先使用段内 map 的 `keySet()` 或迭代视图；
 3. 需要删除语义时，使用可回收的段级结构，而非全局 `HashSet` 常驻。
+
+### 实施归属调整
+
+- 该项与分段重构强耦合，必须与 P0-2 同批交付；
+- 不应延后到后续 PR，否则会削弱分段 Reader 的内存收益。
 
 ### 改动点
 
@@ -251,7 +268,7 @@ inflate 是放大器，不是主修复路径。
 ## 7.1 灰度顺序
 
 1. 仅启用 `safetyFactor`；
-2. 启用 segment 独立 scanner 生命周期 + log-only 闭环；
+2. 启用 segment 独立 scanner 生命周期 + log-only 闭环 + 消除 `deltaRecordKeys` 冗余；
 3. 启用 runtime heap 水位触发 spill；
 4. 最后评估 inflate 侧补充优化。
 
@@ -266,8 +283,8 @@ inflate 是放大器，不是主修复路径。
 ## 8. PR 拆分建议
 
 - **PR-1（P0）**：value/key 双侧安全系数 + 最小估算下限 + 指标
-- **PR-2（P0）**：segment 独立 scanner + 段结束释放 + log-only 闭环 + 禁止全量 scan
-- **PR-3（P0/P1）**：移除 `deltaRecordKeys` 冗余拷贝 + runtime heap 触发 spill + 大记录直落盘
+- **PR-2（P0）**：segment 独立 scanner + 段结束释放 + log-only 闭环 + 禁止全量 scan + 消除 `deltaRecordKeys` 冗余
+- **PR-3（P1）**：runtime heap 触发 spill + 大记录直落盘
 - **PR-4（P2）**：inflate 防护与流式解压优化（可选）
 
 ---
