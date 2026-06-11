@@ -1,25 +1,14 @@
-# Hive RT OOM 修复方案（Inflate + Spill 估算双路径）
+# Hive RT OOM 修复方案（修正版）
 
-## 1. 背景与问题定义
+## 1. 结论先行（根因重排）
 
-在 Hive 读取 Hudi MOR realtime（RT）链路中出现 `java.lang.OutOfMemoryError: Java heap space`，典型堆栈如下：
+本方案按最新复盘结论调整优先级：
 
-- `HoodieLogBlock.inflate`
-- `HoodieDataBlock.readRecordsFromBlockPayload`
-- `AbstractHoodieLogRecordReader.processDataBlock`
-- `HoodieMergedLogRecordScanner.performScan`
-- `RealtimeCompactedRecordReader.getMergedLogRecordScanner`
+1. **主因**：`HoodieRecordSizeEstimator` 低估导致 `ExternalSpillableMap` 溢写触发过晚或失效，`inMemoryMap` 持续增长。
+2. **放大器**：高堆占用下，`HoodieLogBlock.inflate` 分配连续 `byte[]` 失败，引发 OOM。
+3. **关键结构问题**：分段 merge 若复用同一个 scanner 且 records 不释放，内存仍是 O(U)，无法降到 O(S)。
 
-从该堆栈可确认：
-
-1. 触发点是 **log block 解压（inflate）阶段**，属于大块内存分配失败。
-2. 即便 `ExternalSpillableMap` 存在，OOM 仍可能在进入 map 前发生。
-3. `SizeEstimator` 低估不是唯一根因，但会将堆推向高水位，显著放大 OOM 风险。
-
-因此修复应采用“双路径”：
-
-- 路径 A（优先）：降低 `inflate` 大数组分配风险；
-- 路径 B（并行/后续）：修复 spill 内存估算偏低与触发滞后。
+因此修复顺序必须是：**先修 Spill/分段生命周期，再做 inflate 侧增强**。
 
 ---
 
@@ -27,202 +16,179 @@
 
 ### 2.1 功能目标
 
-- 避免 Hive RT 读取在 log block 解压阶段发生 OOM。
-- 保持 merge 语义与现有实现一致（insert/update/delete/preCombine）。
-- 保持默认行为兼容，通过配置渐进启用新逻辑。
+- 避免 Hive RT 读取 OOM，优先消除 `ExternalSpillableMap` 常驻膨胀问题。
+- 分段读取内存复杂度从 O(U) 降到 O(S)（S 为单段 key 数）。
+- 保持与 legacy 一致的 merge 语义（insert/update/delete/preCombine）。
 
 ### 2.2 非功能目标
 
-- 将读取链路峰值内存从“随 block 大小增长”降为“随流式 buffer 增长”。
-- 使 spill 触发更接近真实内存使用，降低高水位堆积。
-- 任何异常可 fail-open 降级（可配置）。
+- 保持默认行为兼容，通过开关灰度启用。
+- 新增指标支持定位“估算偏差”和“分段释放是否生效”。
 
 ---
 
-## 3. 总体策略与优先级
+## 3. 修复优先级（最终版）
 
-### P0：先止血 `inflate` OOM
+### P0：止血（必须先做）
 
-1. 增加 inflate 上限保护；
-2. 将整块解压改为流式解压；
-3. 在 reader 链路上增加 fail-open 降级能力。
+1. `SizeEstimator` 引入安全系数（8~10x，可配）；
+2. 分段 merge 改为 **每段独立 scanner + 段结束 close 并释放 records**；
+3. 禁止 segment 路径回落到全量 `performScan()`。
 
-### P1：修正 spill 估算与触发
+### P1：稳态优化
 
-1. 增加估算与真实采样的动态校正；
-2. 前移 spill 触发阈值；
-3. 大记录直接落盘策略。
+1. spill 触发改为“估算值 + Runtime 内存水位”双条件；
+2. 大记录直落盘；
+3. 指标完善与参数调优。
 
-### P2：验证与灰度
+### P2：补充优化（次优先）
 
-1. 指标打通；
-2. 压测与回归；
-3. 分批开关灰度发布。
+1. inflate 防护（谨慎使用，默认建议关闭或高阈值）；
+2. 流式解压优化（收益次于 P0/P1，不作为主修复路径）。
 
 ---
 
 ## 4. 详细改造设计
 
-## 4.1 路径 A：`inflate` 风险治理（主因）
+## 4.1 P0-1：修复 `SizeEstimator` 低估（最高优先）
 
-### A1. 解压上限保护
-
-#### 目标
-
-将不可控 OOM 转为可观测、可降级的受控异常。
-
-#### 建议改动点
-
-- `hudi-common/.../HoodieLogBlock.java`
-  - `inflate(...)`（或等效解压入口）
-
-#### 建议配置
-
-- `hoodie.realtime.logblock.inflate.max.bytes`（默认建议 `64MB` 或 `128MB`）
-- `hoodie.realtime.logblock.inflate.failopen.enabled`（默认建议 `true`）
-
-#### 行为
-
-- 解压过程中若累计输出字节数超过阈值，抛出 `HoodieLogBlockTooLargeException`（新异常）。
-- 上层 reader 根据 fail-open 策略决定降级或失败。
-
----
-
-### A2. 流式解压替代整块解压
-
-#### 目标
-
-避免一次性分配超大连续 `byte[]`。
-
-#### 建议改动点
-
-- `hudi-common/.../HoodieDataBlock.java`
-  - `readRecordsFromBlockPayload(...)`
-  - `getRecordIterator(...)`
-- 相关 block 实现（Avro/Parquet/HFile）的 payload 读取路径。
-
-#### 设计要点
-
-1. 使用流式解压（例如 `InflaterInputStream`）读取压缩 payload；
-2. 按固定 chunk（例如 64KB/256KB）推进反序列化；
-3. 记录迭代器保持惰性消费，不在内存中整体展开 block。
-
-#### 预期收益
-
-- 内存峰值由 O(block_size) 降到 O(chunk_size + record_window)；
-- 在高堆占用时，显著降低连续大数组分配失败概率。
-
----
-
-### A3. Reader 级 fail-open 降级
-
-#### 目标
-
-发生大块异常时不中断所有任务，提高整体可用性。
-
-#### 建议改动点
-
-- `hudi-hadoop-mr/.../HoodieRealtimeRecordReader.java`
-- `hudi-hadoop-mr/.../RealtimeCompactedRecordReader.java`
-- 已有分段 reader 路径（如 `SegmentedRealtimeCompactedRecordReader`）
-
-#### 行为
-
-- 捕获 `HoodieLogBlockTooLargeException` 或解压相关受控异常；
-- 若 `failopen=true`：降级到 legacy/可跳过策略并打印告警；
-- 若 `failopen=false`：显式失败并附带诊断信息。
-
----
-
-## 4.2 路径 B：Spill 估算与触发优化（放大器）
-
-### B1. `SizeEstimator` 动态校正
-
-#### 目标
-
-降低估算偏差导致 spill 触发偏晚。
-
-#### 建议改动点
+### 改动点
 
 - `hudi-common/.../HoodieRecordSizeEstimator.java`
 - `hudi-common/.../ExternalSpillableMap.java`
 
-#### 方案
+### 方案
 
-1. 保留当前轻量估算；
-2. 每 N 条进行一次真实采样（序列化后取字节长度）；
-3. 通过 EWMA 动态更新估算值；
-4. 设置估算下限（防止被低估拖垮）。
+1. 在现有估算结果上引入安全系数：
+   - `estimatedSize = rawEstimatedSize * safetyFactor`
+2. 新增配置：
+   - `hoodie.spill.record.size.safety.factor`（默认 `8`，可调 `8~10`）
+3. 增加最小估算下限（防止极小值误判）：
+   - `hoodie.spill.record.size.min.bytes`（默认例如 `1024`）
+
+### 为什么先做这个
+
+- 改动小、见效快，可直接让 spill 提前触发，快速抑制 `inMemoryMap` 无界增长。
+- 比 EWMA 采样方案更直接，适合线上止血。
 
 ---
 
-### B2. 提前 spill 与大记录直落盘
+## 4.2 P0-2：分段 merge 生命周期重构（独立 scanner）
 
-#### 目标
+### 目标
 
-避免内存接近极限才触发 spill。
+确保内存真正按段释放，而不是全局累积。
 
-#### 建议配置
+### 关键要求（必须满足）
 
-- `hoodie.spill.early.trigger.fraction`（默认 `0.75`~`0.80`）
+1. **每个 segment 创建独立 `HoodieMergedLogRecordScanner`**；
+2. 仅扫描当前 segment 的 key 集（`scanByFullKeys` 优先）；
+3. segment merge 完成后：
+   - 清空段内 map；
+   - `scanner.close()`；
+   - 释放临时结构；
+4. 下一个 segment 重新创建 scanner，不复用上一段状态。
+
+### 改动点
+
+- `hudi-hadoop-mr/.../SegmentedRealtimeCompactedRecordReader.java`
+- 相关分段执行器/装载器（若已有拆分类则分别调整）
+
+### 复杂度目标
+
+- 从全局 O(U) 转为段级 O(S)。
+
+---
+
+## 4.3 P0-3：禁止 segment 路径触发全量 scan
+
+### 问题
+
+若 segment 流程末尾再次执行 `scan()`/`performScan()`，会回到全量 materialize，抵消分段收益。
+
+### 要求
+
+- segment 模式下全程禁用全量 scan；
+- log-only 输出也必须分段或按增量策略处理，不能追加一次全量扫描兜底。
+
+### 改动点
+
+- `hudi-hadoop-mr/.../SegmentedRealtimeCompactedRecordReader.java`
+- 与 `HoodieMergedLogRecordScanner` 调用处相关的控制逻辑。
+
+---
+
+## 4.4 P1：spill 触发策略升级（基于运行时内存）
+
+### 问题
+
+仅基于 `currentInMemoryMapSize` 的比例阈值不可靠，因为该值本身受估算偏差影响。
+
+### 方案
+
+触发条件改为：
+
+- 条件 A：估算值达到阈值；
+- 条件 B：JVM 运行时内存水位达到阈值（例如 used/max）；
+- 满足任一条件即可 spill。
+
+### 建议配置
+
+- `hoodie.spill.runtime.heap.usage.trigger`（默认 `0.70`~`0.80`）
 - `hoodie.spill.large.record.direct.to.disk.enabled`（默认 `true`）
-- `hoodie.spill.large.record.threshold.bytes`（默认例如 `1MB`）
-
-#### 行为
-
-- 达到提前阈值即进入 spill 模式；
-- 超大单条记录不进 in-memory map，直接写 disk map。
+- `hoodie.spill.large.record.threshold.bytes`（默认 `1MB`）
 
 ---
 
-## 4.3 与现有分段 Merge 的协同
+## 4.5 P2：inflate 侧优化（降级处理）
 
-已实现的 segmented merge（opt-in）可以降低 key map 常驻规模，但仍需注意：
+### 定位
 
-1. 若仍触发全量 `scan()`，末尾阶段仍可能放大 inflate 风险；
-2. 应优先使用按 segment 的增量扫描策略，避免回退到 `performScan()`；
-3. 与本方案 A/B 结合后，才能形成完整闭环。
+inflate 是放大器，不是主修复路径。
+
+### 建议策略
+
+1. 仅保留保守的防护开关，不作为默认强策略；
+2. 流式解压作为可选优化推进；
+3. 避免激进低阈值导致正常大 block 被误杀。
 
 ---
 
 ## 5. 测试与验收
 
-## 5.1 单元测试
+## 5.1 单测（P0 必须）
 
-- Inflate 上限触发：超阈值时抛受控异常，不触发 OOM；
-- 流式解压语义一致性：与旧实现输出记录一致；
-- SizeEstimator 校正：估算误差随采样收敛；
-- 提前 spill / 大记录直落盘：行为符合预期。
+- 安全系数生效后，spill 提前触发；
+- segment 独立 scanner 生效，段结束后 records 释放；
+- segment 模式下不触发全量 `performScan()`。
 
-## 5.2 集成测试
+## 5.2 集成测试（P0/P1）
 
-- 构造“单 file group + 大 log block + 高 unique key”场景；
-- 验证 Hive RT 不再 OOM；
-- 验证结果与 legacy 一致（集合与语义一致）。
+- 构造“高 unique key + 大 log 文件”场景；
+- 验证内存峰值随 segment 大小变化，而非随全量 U 增长；
+- 验证结果与 legacy 一致。
 
-## 5.3 性能验收门槛
+## 5.3 验收门槛
 
-- `inflate_oom_count == 0`
-- 峰值堆内存下降（建议目标 >= 30%）
-- 查询耗时回归可控（建议目标 <= 15%）
-- 无语义回归（delete/preCombine 规则一致）
+- OOM 消失或显著下降；
+- `inMemoryMap` 峰值显著下降；
+- 语义无回归。
 
 ---
 
-## 6. 指标与可观测性
+## 6. 指标与可观测性（重点调整）
 
-建议新增（日志或 metrics）：
+新增或强化：
 
-- `inflate_attempt_count`
-- `inflate_block_compressed_bytes`
-- `inflate_block_uncompressed_bytes`
-- `inflate_guard_reject_count`
-- `spill_count`
-- `spill_bytes`
-- `estimated_record_size_bytes`
-- `sampled_record_size_bytes`
-- `estimation_error_ratio`
-- `fallback_to_legacy_count`
+- `spill_estimated_record_size_bytes`
+- `spill_effective_record_size_bytes`（含安全系数后的值）
+- `spill_safety_factor`
+- `spill_inmemory_entries_peak`
+- `spill_disk_entries`
+- `segment_scanner_create_count`
+- `segment_scanner_close_count`
+- `segment_records_released_count`
+- `full_scan_invocation_count`（segment 模式下应为 0）
 
 ---
 
@@ -230,36 +196,36 @@
 
 ## 7.1 灰度顺序
 
-1. 仅开启 inflate 上限保护（最小风险）；
-2. 小流量开启流式解压；
-3. 开启 spill 估算动态校正；
-4. 开启提前 spill 与大记录直落盘。
+1. 仅启用 `safetyFactor`；
+2. 启用 segment 独立 scanner 生命周期；
+3. 启用 runtime heap 水位触发 spill；
+4. 最后评估 inflate 侧补充优化。
 
 ## 7.2 回滚策略
 
-- 所有新行为均通过配置开关控制；
-- 任一阶段异常可单独回退，不影响其他优化项；
-- 默认保留 legacy 路径作为兜底。
+- 每一步均可独立关闭开关回退；
+- 保留 legacy 路径；
+- 如出现性能异常，先调系数与 segment 参数，再考虑回滚。
 
 ---
 
-## 8. 推荐实施拆分（PR 规划）
+## 8. PR 拆分建议
 
-- **PR-1（P0）**：inflate 上限 + 受控异常 + fail-open 降级
-- **PR-2（P0）**：流式解压与迭代读取改造
-- **PR-3（P1）**：SizeEstimator 动态校正 + spill 策略优化
-- **PR-4（P2）**：压测基准、指标完善、文档与默认参数建议
+- **PR-1（P0）**：`SizeEstimator` 安全系数 + 最小估算下限 + 指标
+- **PR-2（P0）**：segment 独立 scanner + 段结束释放 + 禁止全量 scan
+- **PR-3（P1）**：runtime heap 触发 spill + 大记录直落盘
+- **PR-4（P2）**：inflate 防护与流式解压优化（可选）
 
 ---
 
 ## 9. 风险与缓解
 
-- 风险：流式解压带来 CPU 开销上升  
-  缓解：通过 chunk size 与并发配置调优。
+- 风险：安全系数过高导致过度 spill、IO 上升  
+  缓解：按表分级配置，先 8x，再根据指标调到 6x/10x。
 
-- 风险：spill 过早导致 IO 压力  
-  缓解：提供可调阈值，按表类型分层配置。
+- 风险：segment 太小导致重复扫描 IO 增加  
+  缓解：通过 `segment.max.keys/max.bytes` 调优，建立压测基线。
 
-- 风险：fail-open 掩盖数据问题  
-  缓解：告警分级 + 指标阈值触发后自动 fail-close（可选）。
+- 风险：实现不当导致 segment 仍共享 scanner 状态  
+  缓解：以 `create_count == close_count` 和 `full_scan_invocation_count==0` 作为强校验指标。
 
