@@ -54,22 +54,34 @@
 
 ### 改动点
 
-- `hudi-common/.../HoodieRecordSizeEstimator.java`
+- `hudi-common/.../HoodieRecordSizeEstimator.java`（value 侧）
+- `hudi-common/.../DefaultSizeEstimator.java` 或 key 估算调用点（key 侧）
 - `hudi-common/.../ExternalSpillableMap.java`
 
 ### 方案
 
-1. 在现有估算结果上引入安全系数：
-   - `estimatedSize = rawEstimatedSize * safetyFactor`
+1. 在现有估算结果上引入安全系数（同时覆盖 value 和 key）：
+   - `effectiveValueSize = rawValueEstimatedSize * valueSafetyFactor`
+   - `effectiveKeySize = rawKeyEstimatedSize * keySafetyFactor`
 2. 新增配置：
    - `hoodie.spill.record.size.safety.factor`（默认 `8`，可调 `8~10`）
+   - `hoodie.spill.key.size.safety.factor`（默认 `2`~`3`，按 key 长度分布调优）
 3. 增加最小估算下限（防止极小值误判）：
    - `hoodie.spill.record.size.min.bytes`（默认例如 `1024`）
+   - `hoodie.spill.key.size.min.bytes`（默认例如 `64`）
 
 ### 为什么先做这个
 
 - 改动小、见效快，可直接让 spill 提前触发，快速抑制 `inMemoryMap` 无界增长。
 - 比 EWMA 采样方案更直接，适合线上止血。
+
+### 安全系数依据（补充）
+
+- `HoodieAvroIndexedRecord` 浅堆通常在 `40~60B`；
+- 实际深堆（含 `GenericRecord` 子对象）常见在 `600~700B`；
+- value 侧比值通常在 `10~17x`；
+- 叠加 `HashMap.Entry` 等结构开销后，综合倍率经验上落在 `7~10x`；
+- 因此默认 `8x` 是合理起步值，但必须按 schema 复杂度和线上指标调参。
 
 ---
 
@@ -111,6 +123,18 @@
 - segment 模式下全程禁用全量 scan；
 - log-only 输出也必须分段或按增量策略处理，不能追加一次全量扫描兜底。
 
+### log-only 输出闭环方案（新增）
+
+禁止全量 value scan 后，log-only 记录需要独立发现机制，建议如下：
+
+1. 引入轻量 `logAllKeysSet`（仅存 key，不存 value）；
+2. 来源优先级：
+   - 优先：扫描 log block header / key 索引（若可用）构建 key 集；
+   - 退化：执行一次“仅提取 key 的轻量扫描”（不 materialize value）；
+3. base 侧按 segment 读取时，把命中的 key 写入 `matchedBaseKeysSet`；
+4. 结束时输出 `logOnlyKeys = logAllKeysSet - matchedBaseKeysSet`；
+5. 对 `logOnlyKeys` 再按 segment 批量 `scanByFullKeys` 拉取 value 并输出，避免全量 value scan。
+
 ### 改动点
 
 - `hudi-hadoop-mr/.../SegmentedRealtimeCompactedRecordReader.java`
@@ -118,7 +142,26 @@
 
 ---
 
-## 4.4 P1：spill 触发策略升级（基于运行时内存）
+## 4.4 P0-4：消除 `deltaRecordKeys` 冗余拷贝
+
+### 问题
+
+legacy 路径中 `deltaRecordKeys = new HashSet<>(deltaRecordMap.keySet())` 会造成 key 双份存储，放大内存占用。
+
+### 方案
+
+1. 分段重构中不再维护全局 `deltaRecordKeys` 副本；
+2. 优先使用段内 map 的 `keySet()` 或迭代视图；
+3. 需要删除语义时，使用可回收的段级结构，而非全局 `HashSet` 常驻。
+
+### 改动点
+
+- `hudi-hadoop-mr/.../RealtimeCompactedRecordReader.java`（legacy 可选优化）
+- `hudi-hadoop-mr/.../SegmentedRealtimeCompactedRecordReader.java`（必须）
+
+---
+
+## 4.5 P1：spill 触发策略升级（基于运行时内存）
 
 ### 问题
 
@@ -132,15 +175,22 @@
 - 条件 B：JVM 运行时内存水位达到阈值（例如 used/max）；
 - 满足任一条件即可 spill。
 
+### 运行时水位计算与采样节奏（补充）
+
+1. 使用 `used = totalMemory - freeMemory`，`usage = used / maxMemory`；
+2. 避免每次 `put()` 都检查，按固定采样节奏检查（建议与现有估算采样一致，如每 100 条一次）；
+3. 使用短窗口平滑（例如最近 3 次采样取 max）降低 GC 抖动带来的误判。
+
 ### 建议配置
 
 - `hoodie.spill.runtime.heap.usage.trigger`（默认 `0.70`~`0.80`）
 - `hoodie.spill.large.record.direct.to.disk.enabled`（默认 `true`）
 - `hoodie.spill.large.record.threshold.bytes`（默认 `1MB`）
+- `hoodie.spill.runtime.heap.sample.interval.records`（默认 `100`）
 
 ---
 
-## 4.5 P2：inflate 侧优化（降级处理）
+## 4.6 P2：inflate 侧优化（降级处理）
 
 ### 定位
 
@@ -182,13 +232,17 @@ inflate 是放大器，不是主修复路径。
 
 - `spill_estimated_record_size_bytes`
 - `spill_effective_record_size_bytes`（含安全系数后的值）
+- `spill_effective_key_size_bytes`（含 key 安全系数后的值）
 - `spill_safety_factor`
+- `spill_key_safety_factor`
 - `spill_inmemory_entries_peak`
 - `spill_disk_entries`
 - `segment_scanner_create_count`
 - `segment_scanner_close_count`
 - `segment_records_released_count`
 - `full_scan_invocation_count`（segment 模式下应为 0）
+- `log_only_keys_count`
+- `log_only_scan_mode`（header_index / key_only_scan）
 
 ---
 
@@ -197,7 +251,7 @@ inflate 是放大器，不是主修复路径。
 ## 7.1 灰度顺序
 
 1. 仅启用 `safetyFactor`；
-2. 启用 segment 独立 scanner 生命周期；
+2. 启用 segment 独立 scanner 生命周期 + log-only 闭环；
 3. 启用 runtime heap 水位触发 spill；
 4. 最后评估 inflate 侧补充优化。
 
@@ -211,9 +265,9 @@ inflate 是放大器，不是主修复路径。
 
 ## 8. PR 拆分建议
 
-- **PR-1（P0）**：`SizeEstimator` 安全系数 + 最小估算下限 + 指标
-- **PR-2（P0）**：segment 独立 scanner + 段结束释放 + 禁止全量 scan
-- **PR-3（P1）**：runtime heap 触发 spill + 大记录直落盘
+- **PR-1（P0）**：value/key 双侧安全系数 + 最小估算下限 + 指标
+- **PR-2（P0）**：segment 独立 scanner + 段结束释放 + log-only 闭环 + 禁止全量 scan
+- **PR-3（P0/P1）**：移除 `deltaRecordKeys` 冗余拷贝 + runtime heap 触发 spill + 大记录直落盘
 - **PR-4（P2）**：inflate 防护与流式解压优化（可选）
 
 ---
