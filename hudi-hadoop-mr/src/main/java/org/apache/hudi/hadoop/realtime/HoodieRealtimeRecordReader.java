@@ -19,6 +19,7 @@
 package org.apache.hudi.hadoop.realtime;
 
 import org.apache.hudi.exception.HoodieException;
+import org.apache.hudi.hadoop.config.HoodieRealtimeConfig;
 
 import org.apache.hadoop.io.ArrayWritable;
 import org.apache.hadoop.io.NullWritable;
@@ -51,6 +52,12 @@ public class HoodieRealtimeRecordReader implements RecordReader<NullWritable, Ar
     return Boolean.parseBoolean(jobConf.get(REALTIME_SKIP_MERGE_PROP, DEFAULT_REALTIME_SKIP_MERGE));
   }
 
+  public static boolean useSegmentedCompactedReader(JobConf jobConf) {
+    return jobConf.getBoolean(
+        HoodieRealtimeConfig.SEGMENTED_MERGE_READ_ENABLED_PROP,
+        HoodieRealtimeConfig.DEFAULT_SEGMENTED_MERGE_READ_ENABLED);
+  }
+
   /**
    * Construct record reader based on job configuration.
    *
@@ -65,6 +72,16 @@ public class HoodieRealtimeRecordReader implements RecordReader<NullWritable, Ar
       if (canSkipMerging(jobConf)) {
         LOG.info("Enabling un-merged reading of realtime records");
         return new RealtimeUnmergedRecordReader(split, jobConf, realReader);
+      }
+      if (useSegmentedCompactedReader(jobConf)) {
+        LOG.info("Enabling segmented merged reading of realtime records for split {}", split);
+        try {
+          return new SegmentedRealtimeCompactedRecordReader(split, jobConf, realReader);
+        } catch (Exception segmentedEx) {
+          LOG.warn("Falling back to legacy merged reader after segmented reader init failure for split {}",
+              split, segmentedEx);
+          return new RealtimeCompactedRecordReader(split, jobConf, realReader);
+        }
       }
       LOG.info("Enabling merged reading of realtime records for split " + split);
       return new RealtimeCompactedRecordReader(split, jobConf, realReader);

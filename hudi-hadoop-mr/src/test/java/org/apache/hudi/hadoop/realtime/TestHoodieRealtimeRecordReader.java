@@ -76,6 +76,8 @@ import org.apache.hadoop.mapred.RecordReader;
 import org.apache.hadoop.mapred.Reporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -178,6 +180,55 @@ public class TestHoodieRealtimeRecordReader {
   public void testParquetInlineReader() throws Exception {
     testReaderInternal(ExternalSpillableMap.DiskMapType.BITCASK, false, false,
         HoodieLogBlock.HoodieLogBlockType.PARQUET_DATA_BLOCK);
+  }
+
+  @Test
+  @DisabledOnOs(OS.WINDOWS)
+  public void testSegmentedReaderRoutingAndOutput() throws Exception {
+    Schema schema = HoodieAvroUtils.addMetadataFields(SchemaTestUtil.getEvolvedSchema());
+    HoodieTestUtils.init(storageConf, basePath.toUri().toString(), HoodieTableType.MERGE_ON_READ);
+    String baseInstant = "100";
+    File partitionDir = InputFormatTestUtil.prepareParquetTable(basePath, schema, 1, 100, baseInstant,
+        HoodieTableType.MERGE_ON_READ);
+
+    HoodieCommitMetadata commitMetadata = CommitUtils.buildMetadata(Collections.emptyList(), Collections.emptyMap(),
+        Option.empty(), WriteOperationType.UPSERT, schema.toString(), HoodieTimeline.DELTA_COMMIT_ACTION);
+    FileCreateUtils.createDeltaCommit(basePath.toString(), baseInstant, commitMetadata);
+    FileInputFormat.setInputPaths(baseJobConf, partitionDir.getPath());
+
+    String newCommitTime = "101";
+    Writer writer = InputFormatTestUtil.writeDataBlockToLogFile(partitionDir, storage, schema, "fileid0",
+        baseInstant, newCommitTime, 120, 0, 1);
+    writer.close();
+    FileCreateUtils.createDeltaCommit(basePath.toString(), newCommitTime, commitMetadata);
+
+    HoodieRealtimeFileSplit split = new HoodieRealtimeFileSplit(
+        new FileSplit(new Path(partitionDir + "/fileid0_1-0-1_" + baseInstant + ".parquet"), 0, 1, baseJobConf),
+        basePath.toUri().toString(), Collections.singletonList(writer.getLogFile()), newCommitTime, false, Option.empty());
+
+    RecordReader<NullWritable, ArrayWritable> reader = new MapredParquetInputFormat().getRecordReader(
+        new FileSplit(split.getPath(), 0, fs.getLength(split.getPath()), (String[]) null), baseJobConf, null);
+
+    JobConf jobConf = new JobConf(baseJobConf);
+    setHiveColumnNameProps(schema.getFields(), jobConf, true);
+    jobConf.setBoolean(HoodieRealtimeConfig.SEGMENTED_MERGE_READ_ENABLED_PROP, true);
+    jobConf.setInt(HoodieRealtimeConfig.SEGMENTED_MERGE_MAX_KEYS_PROP, 8);
+    jobConf.setLong(HoodieRealtimeConfig.SEGMENTED_MERGE_MAX_BYTES_PROP, 1024L * 8L);
+    jobConf.set(HoodieRealtimeConfig.SEGMENTED_MERGE_LOG_SCAN_MODE_PROP, "UNKNOWN_MODE");
+
+    HoodieRealtimeRecordReader recordReader = new HoodieRealtimeRecordReader(split, jobConf, reader);
+    assertTrue(recordReader.getReader() instanceof SegmentedRealtimeCompactedRecordReader);
+
+    NullWritable key = recordReader.createKey();
+    ArrayWritable value = recordReader.createValue();
+    int recordCnt = 0;
+    while (recordReader.next(key, value)) {
+      recordCnt++;
+      key = recordReader.createKey();
+      value = recordReader.createValue();
+    }
+    assertEquals(120, recordCnt);
+    recordReader.close();
   }
 
   private void testReaderInternal(ExternalSpillableMap.DiskMapType diskMapType,

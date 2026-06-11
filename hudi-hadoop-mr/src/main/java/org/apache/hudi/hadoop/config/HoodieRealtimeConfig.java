@@ -47,4 +47,20 @@ public final class HoodieRealtimeConfig {
   // Precompute timeline state on driver side and serialize to realtime splits.
   public static final String PRELOAD_SPLIT_TIMELINE_STATE = "hoodie.realtime.split.timeline.preload.enabled";
   public static final boolean DEFAULT_PRELOAD_SPLIT_TIMELINE_STATE = false;
+
+  // Property to enable segmented merge for realtime MOR reads.
+  public static final String SEGMENTED_MERGE_READ_ENABLED_PROP = "hoodie.realtime.merge.segmented.enabled";
+  public static final boolean DEFAULT_SEGMENTED_MERGE_READ_ENABLED = false;
+
+  // Maximum number of base records to process in one segment.
+  public static final String SEGMENTED_MERGE_MAX_KEYS_PROP = "hoodie.realtime.merge.segment.max.keys";
+  public static final int DEFAULT_SEGMENTED_MERGE_MAX_KEYS = 200_000;
+
+  // Maximum estimated buffered bytes to process in one segment.
+  public static final String SEGMENTED_MERGE_MAX_BYTES_PROP = "hoodie.realtime.merge.segment.max.bytes";
+  public static final long DEFAULT_SEGMENTED_MERGE_MAX_BYTES = 128L * 1024L * 1024L;
+
+  // Segment log scan mode: FULLKEYS or PREFIX.
+  public static final String SEGMENTED_MERGE_LOG_SCAN_MODE_PROP = "hoodie.realtime.merge.segment.log.scan.mode";
+  public static final String DEFAULT_SEGMENTED_MERGE_LOG_SCAN_MODE = "FULLKEYS";
 }
