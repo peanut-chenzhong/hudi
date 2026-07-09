@@ -24,7 +24,6 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.Literal.TrueLiteral
 import org.apache.spark.sql.catalyst.expressions.{Alias, And, Attribute, AttributeReference, EqualNullSafe, EqualTo, Expression, ExtractValue, GetStructField, GreaterThan, GreaterThanOrEqual, In, InSet, IsNotNull, IsNull, LessThan, LessThanOrEqual, Literal, Not, Or, StartsWith, SubqueryExpression}
-import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.hudi.ColumnStatsExpressionUtils._
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{AnalysisException, HoodieCatalystExpressionUtils}
@@ -340,19 +339,19 @@ object DataSkippingUtils extends Logging {
       case Alias(c, _) => getTargetColNameParts(c)
       case GetStructField(c, _, Some(name)) => getTargetColNameParts(c) :+ name
       case ex: ExtractValue =>
-        throw new AnalysisException(s"convert reference to name failed, Updating nested fields is only supported for StructType: ${ex}.")
+        throw HoodieAnalysisExceptionUtils.analysisException(s"convert reference to name failed, Updating nested fields is only supported for StructType: ${ex}.")
       case other =>
-        throw new AnalysisException(s"convert reference to name failed,  Found unsupported expression ${other}")
+        throw HoodieAnalysisExceptionUtils.analysisException(s"convert reference to name failed,  Found unsupported expression ${other}")
     }
   }
 }
 
 object ColumnStatsExpressionUtils {
 
-  @inline def genColMinValueExpr(colName: String): Expression = col(getMinColumnNameFor(colName)).expr
-  @inline def genColMaxValueExpr(colName: String): Expression = col(getMaxColumnNameFor(colName)).expr
-  @inline def genColNumNullsExpr(colName: String): Expression = col(getNullCountColumnNameFor(colName)).expr
-  @inline def genColValueCountExpr: Expression = col(getValueCountColumnNameFor).expr
+  @inline def genColMinValueExpr(colName: String): Expression = UnresolvedAttribute.quotedString(getMinColumnNameFor(colName))
+  @inline def genColMaxValueExpr(colName: String): Expression = UnresolvedAttribute.quotedString(getMaxColumnNameFor(colName))
+  @inline def genColNumNullsExpr(colName: String): Expression = UnresolvedAttribute.quotedString(getNullCountColumnNameFor(colName))
+  @inline def genColValueCountExpr: Expression = UnresolvedAttribute.quotedString(getValueCountColumnNameFor)
 
   @inline def genColumnValuesEqualToExpression(colName: String,
                                                value: Expression,

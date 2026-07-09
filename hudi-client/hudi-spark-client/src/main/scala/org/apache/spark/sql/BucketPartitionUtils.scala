@@ -51,6 +51,6 @@ object BucketPartitionUtils {
       .keyBy(row => getPartitionKey(row))
       .repartitionAndSortWithinPartitions(partitioner)
       .values
-    df.sparkSession.internalCreateDataFrame(reRdd, df.schema)
+    DataFrameUtil.createFromInternalRows(df.sparkSession, df.schema, reRdd)
   }
 }

@@ -38,7 +38,7 @@ import org.apache.spark.sql.catalyst.catalog.{CatalogTable, HoodieCatalogTable}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Cast, Expression, Literal}
 import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{AnalysisException, SparkSession}
+import org.apache.spark.sql.SparkSession
 
 import java.net.URI
 import java.text.SimpleDateFormat
@@ -307,13 +307,13 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
                                  resolver: Resolver): Map[String, T] = {
     val normalizedPartSpec = partitionSpec.toSeq.map { case (key, value) =>
       val normalizedKey = partColNames.find(resolver(_, key)).getOrElse {
-        throw new AnalysisException(s"$key is not a valid partition column in table $tblName.")
+        throw HoodieAnalysisExceptionUtils.analysisException(s"$key is not a valid partition column in table $tblName.")
       }
       normalizedKey -> value
     }
 
     if (normalizedPartSpec.size < partColNames.size) {
-      throw new AnalysisException(
+      throw HoodieAnalysisExceptionUtils.analysisException(
         "All partition columns need to be specified for Hoodie's partition")
     }
 
@@ -322,7 +322,7 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
       val duplicateColumns = lowerPartColNames.groupBy(identity).collect {
         case (x, ys) if ys.length > 1 => s"`$x`"
       }
-      throw new AnalysisException(
+      throw HoodieAnalysisExceptionUtils.analysisException(
         s"Found duplicate column(s) in the partition schema: ${duplicateColumns.mkString(", ")}")
     }
 

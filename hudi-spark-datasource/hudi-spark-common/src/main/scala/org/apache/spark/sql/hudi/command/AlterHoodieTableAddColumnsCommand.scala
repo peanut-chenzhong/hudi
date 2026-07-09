@@ -30,9 +30,9 @@ import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.HoodieCatalogTable
-import org.apache.spark.sql.hudi.HoodieOptionConfig
+import org.apache.spark.sql.hudi.{HoodieAnalysisExceptionUtils, HoodieOptionConfig}
 import org.apache.spark.sql.types.{StructField, StructType}
-import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
+import org.apache.spark.sql.{Row, SparkSession}
 
 import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
@@ -53,7 +53,7 @@ case class AlterHoodieTableAddColumnsCommand(tableId: TableIdentifier,
         colsToAdd.map(_.name).filter(col => tableSchema.fieldNames.exists(f => resolver(f, col)))
 
       if (existsColumns.nonEmpty) {
-        throw new AnalysisException(s"Columns: [${existsColumns.mkString(",")}] already exists in the table," +
+        throw HoodieAnalysisExceptionUtils.analysisException(s"Columns: [${existsColumns.mkString(",")}] already exists in the table," +
           s" table columns is: [${hoodieCatalogTable.tableSchemaWithoutMetaFields.fieldNames.mkString(",")}]")
       }
       // Get the new schema
@@ -100,7 +100,7 @@ object AlterHoodieTableAddColumnsCommand extends SparkAdapterSupport with Loggin
       hoodieCatalogTable.tableLocation,
       hoodieCatalogTable.tableName,
       HoodieWriterUtils.parametersWithWriteDefaults(HoodieOptionConfig.mapSqlOptionsToDataSourceWriteConfigs(
-        hoodieCatalogTable.catalogProperties) ++ sparkSession.sqlContext.conf.getAllConfs).asJava
+        hoodieCatalogTable.catalogProperties) ++ sparkSession.sessionState.conf.getAllConfs).asJava
     )
 
     val commitActionType = CommitUtils.getCommitActionType(WriteOperationType.ALTER_SCHEMA, hoodieCatalogTable.tableType)

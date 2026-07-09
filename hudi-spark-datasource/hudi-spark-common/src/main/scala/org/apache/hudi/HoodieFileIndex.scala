@@ -39,7 +39,7 @@ import org.apache.spark.sql.hudi.DataSkippingUtils.translateIntoColumnStatsIndex
 import org.apache.spark.sql.hudi.HoodieSqlCommonUtils
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{Column, SparkSession}
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.unsafe.types.UTF8String
 
 import java.text.SimpleDateFormat
@@ -379,7 +379,7 @@ case class HoodieFileIndex(spark: SparkSession,
             .toSet
 
         val prunedCandidateFileNames =
-          transposedColStatsDF.where(new Column(indexFilter))
+          transposedColStatsDF.where(org.apache.spark.sql.functions.expr(indexFilter.sql))
             .select(HoodieMetadataPayload.COLUMN_STATS_FIELD_FILE_NAME)
             .collect()
             .map(_.getString(0))

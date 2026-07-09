@@ -22,7 +22,8 @@ import org.apache.hudi.AvroConversionUtils
 import org.apache.hudi.avro.{AvroSchemaUtils, HoodieAvroUtils}
 import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
 import org.apache.hudi.exception.HoodieException
-import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
+import org.apache.spark.sql.hudi.HoodieAnalysisExceptionUtils
+import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.HoodieCatalogTable
 import org.apache.spark.sql.hudi.HoodieSqlCommonUtils._
@@ -43,12 +44,12 @@ case class AlterHoodieTableChangeColumnCommand(
 
     // Find the origin column from dataSchema by column name.
     val originColumn = findColumnByName(hoodieCatalogTable.dataSchema, columnName, resolver).getOrElse(
-      throw new AnalysisException(s"Can't find column `$columnName` given table data columns " +
+      throw HoodieAnalysisExceptionUtils.analysisException(s"Can't find column `$columnName` given table data columns " +
         s"${hoodieCatalogTable.dataSchema.fieldNames.mkString("[`", "`, `", "`]")}")
     )
     // Throw an AnalysisException if the column name/dataType is changed.
     if (!columnEqual(originColumn, newColumn, resolver)) {
-      throw new AnalysisException(
+      throw HoodieAnalysisExceptionUtils.analysisException(
         "ALTER TABLE CHANGE COLUMN is not supported for changing column " +
           s"'${originColumn.name}' with type '${originColumn.dataType}' to " +
           s"'${newColumn.name}' with type '${newColumn.dataType}'")

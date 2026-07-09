@@ -353,6 +353,40 @@ jobs:
         run:
           mvn test -Pfunctional-tests -Pjava17 -D"$SCALA_PROFILE" -D"$SPARK_PROFILE" -Dtest=skipJavaTests -DfailIfNoTests=false -pl "$SPARK_COMMON_MODULES,$SPARK_MODULES" $MVN_ARGS
 
+  test-spark4-jdk21:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up JDK 21
+        uses: actions/setup-java@v3
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          architecture: x64
+          cache: maven
+      - name: Build Project
+        run: >
+          mvn clean install -T 2 -Dscala-2.13 -Dspark4.0 -DskipTests=true
+          $MVN_ARGS -am -pl
+          "hudi-examples/hudi-examples-spark,hudi-common,$SPARK_COMMON_MODULES,hudi-spark-datasource/hudi-spark4-common,hudi-spark-datasource/hudi-spark4.0.x"
+      - name: Quickstart Test
+        run: >
+          mvn test -Punit-tests -Dscala-2.13 -Dspark4.0
+          -DwildcardSuites=skipScalaTests -DfailIfNoTests=false
+          -pl hudi-examples/hudi-examples-spark $MVN_ARGS
+      - name: Java UT - Common & Spark4
+        run: >
+          mvn test -Punit-tests -Dscala-2.13 -Dspark4.0
+          -DwildcardSuites=skipScalaTests -DfailIfNoTests=false
+          -pl "hudi-common,$SPARK_COMMON_MODULES,hudi-spark-datasource/hudi-spark4-common,hudi-spark-datasource/hudi-spark4.0.x"
+          $MVN_ARGS
+      - name: Scala UT - Common & Spark4
+        run: >
+          mvn test -Punit-tests -Dscala-2.13 -Dspark4.0
+          -Dtest=skipJavaTests -DfailIfNoTests=false
+          -pl "hudi-common,$SPARK_COMMON_MODULES,hudi-spark-datasource/hudi-spark4-common,hudi-spark-datasource/hudi-spark4.0.x"
+          $MVN_ARGS
+
   test-flink:
     runs-on: ubuntu-latest
     strategy:
@@ -400,6 +434,10 @@ jobs:
         include:
           - scalaProfile: 'scala-2.13'
             flinkProfile: 'flink1.18'
+            sparkProfile: 'spark4.0'
+            sparkRuntime: 'spark4.0.0'
+          - scalaProfile: 'scala-2.13'
+            flinkProfile: 'flink1.18'
             sparkProfile: 'spark3.5'
             sparkRuntime: 'spark3.5.0'
           - scalaProfile: 'scala-2.12'
@@ -426,7 +464,7 @@ jobs:
           SPARK_PROFILE: ${{ matrix.sparkProfile }}
           SPARK_RUNTIME: ${{ matrix.sparkRuntime }}
           SCALA_PROFILE: ${{ matrix.scalaProfile }}
-        if: ${{ env.SPARK_PROFILE >= 'spark3.4' }} # Only support Spark 3.4 for now
+        if: ${{ env.SPARK_PROFILE >= 'spark3.4' && env.SPARK_PROFILE != 'spark4.0' }} # Spark4 docker runtime validation is not enabled yet
         run: |
           HUDI_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
           ./packaging/bundle-validation/run_docker_java17.sh
@@ -436,6 +474,10 @@ jobs:
     strategy:
       matrix:
         include:
+          - scalaProfile: 'scala-2.13'
+            flinkProfile: 'flink1.18'
+            sparkProfile: 'spark4.0'
+            sparkRuntime: 'spark4.0.0'
           - scalaProfile: 'scala-2.13'
             flinkProfile: 'flink1.18'
             sparkProfile: 'spark3.5'
@@ -501,7 +543,7 @@ jobs:
           SPARK_PROFILE: ${{ matrix.sparkProfile }}
           SPARK_RUNTIME: ${{ matrix.sparkRuntime }}
           SCALA_PROFILE: ${{ matrix.scalaProfile }}
-        if: ${{ env.SPARK_PROFILE >= 'spark3' }} # Only run validation on Spark 3
+        if: ${{ env.SPARK_PROFILE >= 'spark3' && env.SPARK_PROFILE != 'spark4.0' }} # Spark4 docker runtime validation is not enabled yet
         run: |
           HUDI_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
           ./packaging/bundle-validation/ci_run.sh hudi_docker_java8 $HUDI_VERSION openjdk8
@@ -511,7 +553,7 @@ jobs:
           SPARK_PROFILE: ${{ matrix.sparkProfile }}
           SPARK_RUNTIME: ${{ matrix.sparkRuntime }}
           SCALA_PROFILE: ${{ matrix.scalaProfile }}
-        if: ${{ env.SPARK_PROFILE >= 'spark3' }} # Only run validation on Spark 3
+        if: ${{ env.SPARK_PROFILE >= 'spark3' && env.SPARK_PROFILE != 'spark4.0' }} # Spark4 docker runtime validation is not enabled yet
         run: |
           HUDI_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
           ./packaging/bundle-validation/ci_run.sh hudi_docker_java11 $HUDI_VERSION openjdk11
@@ -521,7 +563,7 @@ jobs:
           SPARK_PROFILE: ${{ matrix.sparkProfile }}
           SPARK_RUNTIME: ${{ matrix.sparkRuntime }}
           SCALA_PROFILE: ${{ matrix.scalaProfile }}
-        if: ${{ env.SPARK_PROFILE >= 'spark3.3' }} # Only Spark 3.3 and above support Java 17
+        if: ${{ env.SPARK_PROFILE >= 'spark3.3' && env.SPARK_PROFILE != 'spark4.0' }} # Spark4 docker runtime validation is not enabled yet
         run: |
           HUDI_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
           ./packaging/bundle-validation/ci_run.sh hudi_docker_java17 $HUDI_VERSION openjdk17

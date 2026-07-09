@@ -21,7 +21,7 @@ package org.apache.spark.sql
 import org.apache.hudi.SparkAdapterSupport
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.execution.LogicalRDD
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.types.StructType
 
 object DataFrameUtil {
@@ -32,8 +32,33 @@ object DataFrameUtil {
    */
   def createFromInternalRows(sparkSession: SparkSession, schema:
   StructType, rdd: RDD[InternalRow]): DataFrame = {
-    val logicalPlan = LogicalRDD(
-      SparkAdapterSupport.sparkAdapter.getSchemaUtils.toAttributes(schema), rdd)(sparkSession)
-    Dataset.ofRows(sparkSession, logicalPlan)
+    val candidateMethods =
+      sparkSession.getClass.getMethods.filter(_.getName == "internalCreateDataFrame") ++
+        sparkSession.getClass.getDeclaredMethods.filter(_.getName == "internalCreateDataFrame")
+
+    val internalCreateDataFrame = candidateMethods.find(_.getParameterCount == 2)
+      .getOrElse(throw new IllegalStateException("Unable to locate internalCreateDataFrame on SparkSession"))
+    internalCreateDataFrame.setAccessible(true)
+    internalCreateDataFrame.invoke(sparkSession, rdd, schema).asInstanceOf[DataFrame]
+  }
+
+  /**
+   * Spark 4 moved Dataset internals under `org.apache.spark.sql.classic`.
+   * Use reflection to stay source-compatible with both Spark 3 and Spark 4.
+   */
+  def ofRows(sparkSession: SparkSession, logicalPlan: LogicalPlan): DataFrame = {
+    try {
+      val datasetObjectClass = Class.forName("org.apache.spark.sql.classic.Dataset$")
+      val classicSparkSessionClass = Class.forName("org.apache.spark.sql.classic.SparkSession")
+      val module = datasetObjectClass.getField("MODULE$").get(null)
+      val method = datasetObjectClass.getMethod("ofRows", classicSparkSessionClass, classOf[LogicalPlan])
+      method.invoke(module, sparkSession, logicalPlan).asInstanceOf[DataFrame]
+    } catch {
+      case _: ClassNotFoundException =>
+        val datasetObjectClass = Class.forName("org.apache.spark.sql.Dataset$")
+        val module = datasetObjectClass.getField("MODULE$").get(null)
+        val method = datasetObjectClass.getMethod("ofRows", classOf[SparkSession], classOf[LogicalPlan])
+        method.invoke(module, sparkSession, logicalPlan).asInstanceOf[DataFrame]
+    }
   }
 }

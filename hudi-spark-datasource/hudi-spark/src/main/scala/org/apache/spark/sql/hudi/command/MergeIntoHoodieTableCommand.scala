@@ -42,6 +42,7 @@ import org.apache.spark.sql.hudi.HoodieSqlCommonUtils._
 import org.apache.spark.sql.hudi.ProvidesHoodieConfig
 import org.apache.spark.sql.hudi.ProvidesHoodieConfig.{combineOptions, getPartitionPathFieldWriteConfig}
 import org.apache.spark.sql.hudi.analysis.HoodieAnalysis.failAnalysis
+import org.apache.spark.sql.hudi.HoodieAnalysisExceptionUtils
 import org.apache.spark.sql.hudi.command.MergeIntoHoodieTableCommand.{CoercedAttributeReference, encodeAsBase64String, stripCasting, toStructType}
 import org.apache.spark.sql.hudi.command.PartialAssignmentMode.PartialAssignmentMode
 import org.apache.spark.sql.hudi.command.payload.ExpressionPayload
@@ -133,7 +134,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
     if (primaryKeyFields.isPresent) {
       //pkless tables can have more complex conditions
       if (!conditions.forall(p => p.isInstanceOf[EqualTo])) {
-        throw new AnalysisException(s"Currently only equality predicates are supported in MERGE INTO statement on primary key table" +
+        throw HoodieAnalysisExceptionUtils.analysisException(s"Currently only equality predicates are supported in MERGE INTO statement on primary key table" +
           s"(provided ${mergeInto.mergeCondition.sql}")
       }
     }
@@ -166,15 +167,15 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
           //       Which (in the current design) could result in a primary key of the record being modified,
           //       which is not allowed.
           if (!resolvesToSourceAttribute(expr)) {
-            throw new AnalysisException("Only simple conditions of the form `t.id = s.id` are allowed on the " +
+            throw HoodieAnalysisExceptionUtils.analysisException("Only simple conditions of the form `t.id = s.id` are allowed on the " +
               s"primary-key and partition path column. Found `${attr.sql} = ${expr.sql}`")
           }
           expressionSet.remove((attr, expr))
           (attr, expr)
       }
       if (resolving.isEmpty && rk._1.equals("primaryKey")
-        && sparkSession.sqlContext.conf.getConfString(SPARK_SQL_OPTIMIZED_WRITES.key(), "false") == "true") {
-        throw new AnalysisException(s"Hudi tables with primary key are required to match on all primary key colums. Column: '${rk._2}' not found")
+        && sparkSession.sessionState.conf.getConfString(SPARK_SQL_OPTIMIZED_WRITES.key(), "false") == "true") {
+        throw HoodieAnalysisExceptionUtils.analysisException(s"Hudi tables with primary key are required to match on all primary key colums. Column: '${rk._2}' not found")
       }
       resolving
     }).filter(_.nonEmpty).map(_.get)
@@ -210,7 +211,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
           val targetAttr = targetAttrs.find(f => attributeEquals(f, attr)).get
           targetAttr -> castIfNeeded(expr, attr.dataType)
         } else {
-          throw new AnalysisException(s"Invalid MERGE INTO matching condition: ${expr.sql}: "
+          throw HoodieAnalysisExceptionUtils.analysisException(s"Invalid MERGE INTO matching condition: ${expr.sql}: "
             + s"can't cast ${expr.sql} (of ${expr.dataType}) to ${attr.dataType}")
         }
 
@@ -220,12 +221,12 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
           val targetAttr = targetAttrs.find(f => attributeEquals(f, attr)).get
           targetAttr -> castIfNeeded(expr, attr.dataType)
         } else {
-          throw new AnalysisException(s"Invalid MERGE INTO matching condition: ${expr.sql}: "
+          throw HoodieAnalysisExceptionUtils.analysisException(s"Invalid MERGE INTO matching condition: ${expr.sql}: "
             + s"can't cast ${expr.sql} (of ${expr.dataType}) to ${attr.dataType}")
         }
 
       case expr if pkTable =>
-        throw new AnalysisException(s"Invalid MERGE INTO matching condition: `${expr.sql}`: "
+        throw HoodieAnalysisExceptionUtils.analysisException(s"Invalid MERGE INTO matching condition: `${expr.sql}`: "
           + "expected condition should be 'target.id = <source-column-expr>', e.g. "
           + "`t.id = s.id` or `t.id = cast(s.id, ...)")
     }
@@ -255,7 +256,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
               case Assignment(attr: AttributeReference, expr)
                 if resolver(attr.name, preCombineField) && resolvesToSourceAttribute(expr) => expr
             } getOrElse {
-              throw new AnalysisException(s"Failed to resolve pre-combine field `${preCombineField}` w/in the source-table output")
+              throw HoodieAnalysisExceptionUtils.analysisException(s"Failed to resolve pre-combine field `${preCombineField}` w/in the source-table output")
             }
 
         }
@@ -339,7 +340,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
     val incomingDataCols = joinData.output.filterNot(mergeInto.targetTable.outputSet.contains)
     // for pkless table, we need to project the meta columns
     val hasPrimaryKey = hoodieCatalogTable.tableConfig.getRecordKeyFields.isPresent
-    val projectedJoinPlan = if (!hasPrimaryKey || sparkSession.sqlContext.conf.getConfString(SPARK_SQL_OPTIMIZED_WRITES.key(), "false") == "true") {
+    val projectedJoinPlan = if (!hasPrimaryKey || sparkSession.sessionState.conf.getConfString(SPARK_SQL_OPTIMIZED_WRITES.key(), "false") == "true") {
       Project(tableMetaCols ++ incomingDataCols, joinData)
     } else {
       Project(incomingDataCols, joinData)
@@ -383,7 +384,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
 
     val amendedPlan = Project(adjustedSourceTableOutput ++ additionalColumns, projectedJoinPlan)
 
-    Dataset.ofRows(sparkSession, amendedPlan)
+    DataFrameUtil.ofRows(sparkSession, amendedPlan)
   }
 
   /**
@@ -504,7 +505,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
     val attr2Assignments = assignments.map {
       case assign @ Assignment(attr: Attribute, _) => attr -> assign
       case a =>
-        throw new AnalysisException(s"Only assignments of the form `t.field = ...` are supported at the moment (provided: `${a.sql}`)")
+        throw HoodieAnalysisExceptionUtils.analysisException(s"Only assignments of the form `t.field = ...` are supported at the moment (provided: `${a.sql}`)")
     }
 
     // Reorder the assignments to follow the ordering of the target table
@@ -527,7 +528,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
                     Assignment(attr, Literal.default(attr.dataType))
                 }
               case _ =>
-                throw new AnalysisException(s"Assignment expressions have to assign every attribute of target table " +
+                throw HoodieAnalysisExceptionUtils.analysisException(s"Assignment expressions have to assign every attribute of target table " +
                   s"(provided: `${assignments.map(_.sql).mkString(",")}`)")
             }
         }
@@ -593,7 +594,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
     expr.collect { case br: BoundReference => br }
       .foreach(br => {
         if (br.ordinal >= sourceTableOutput.length) {
-          throw new AnalysisException(s"Expressions in insert clause of the MERGE INTO statement can only reference " +
+          throw HoodieAnalysisExceptionUtils.analysisException(s"Expressions in insert clause of the MERGE INTO statement can only reference " +
             s"source table attributes (ordinal ${br.ordinal}, total attributes in the source table ${sourceTableOutput.length})")
         }
       })
@@ -619,7 +620,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
     val hiveSyncConfig = buildHiveSyncConfig(sparkSession, hoodieCatalogTable, tableConfig)
     // for pkless tables, we need to enable optimized merge
     val hasPrimaryKey = tableConfig.getRecordKeyFields.isPresent
-    val enableOptimizedMerge = if (!hasPrimaryKey) "true" else sparkSession.sqlContext.conf.getConfString(SPARK_SQL_OPTIMIZED_WRITES.key(), "false")
+    val enableOptimizedMerge = if (!hasPrimaryKey) "true" else sparkSession.sessionState.conf.getConfString(SPARK_SQL_OPTIMIZED_WRITES.key(), "false")
     val keyGeneratorClassName = if (enableOptimizedMerge == "true") {
       classOf[MergeIntoKeyGenerator].getCanonicalName
     } else {
@@ -663,7 +664,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
       HoodieWriteConfig.COMBINE_BEFORE_UPSERT.key() -> (!StringUtils.isNullOrEmpty(preCombineField)).toString
     )
 
-    combineOptions(hoodieCatalogTable, tableConfig, sparkSession.sqlContext.conf,
+    combineOptions(hoodieCatalogTable, tableConfig, sparkSession.sessionState.conf,
       defaultOpts = Map.empty, overridingOpts = overridingOpts)
   }
 
@@ -676,7 +677,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
 
   private def checkDeletingActions(deletingActions: Seq[DeleteAction]): Unit = {
     if (deletingActions.length > 1) {
-      throw new AnalysisException(s"Only one deleting action is supported in MERGE INTO statement (provided ${deletingActions.length})")
+      throw HoodieAnalysisExceptionUtils.analysisException(s"Only one deleting action is supported in MERGE INTO statement (provided ${deletingActions.length})")
     }
   }
 

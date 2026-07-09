@@ -23,7 +23,7 @@ import org.apache.hudi.common.model.FileSlice
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
 import org.apache.spark.sql.types.{DataType, Decimal}
-import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
+import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String, VariantVal}
 
 class PartitionFileSliceMapping(internalRow: InternalRow,
                                 slices: Map[String, FileSlice]) extends InternalRow {
@@ -65,6 +65,8 @@ class PartitionFileSliceMapping(internalRow: InternalRow,
   override def getBinary(ordinal: Int): Array[Byte] = internalRow.getBinary(ordinal)
 
   override def getInterval(ordinal: Int): CalendarInterval = internalRow.getInterval(ordinal)
+
+  override def getVariant(ordinal: Int): VariantVal = internalRow.getVariant(ordinal)
 
   override def getStruct(ordinal: Int, numFields: Int): InternalRow = internalRow.getStruct(ordinal, numFields)
 

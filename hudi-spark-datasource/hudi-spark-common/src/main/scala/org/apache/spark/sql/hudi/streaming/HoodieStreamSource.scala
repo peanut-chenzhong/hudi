@@ -37,7 +37,7 @@ import org.apache.spark.sql.execution.streaming.{Offset, Source}
 import org.apache.spark.sql.hudi.streaming.HoodieSourceOffset.INIT_OFFSET
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, SQLContext}
+import org.apache.spark.sql.{DataFrame, DataFrameUtil, SQLContext}
 
 /**
   * The Struct Stream Source for Hudi to consume the data by streaming job.
@@ -148,8 +148,8 @@ class HoodieStreamSource(
     val endOffset = HoodieSourceOffset(end)
 
     if (startOffset == endOffset) {
-      sqlContext.internalCreateDataFrame(
-        sqlContext.sparkContext.emptyRDD[InternalRow].setName("empty"), schema, isStreaming = true)
+      DataFrameUtil.createFromInternalRows(
+        sqlContext.sparkSession, schema, sqlContext.sparkContext.emptyRDD[InternalRow].setName("empty"))
     } else {
       if (isCDCQuery) {
         val cdcOptions = Map(
@@ -159,7 +159,7 @@ class HoodieStreamSource(
         val rdd = CDCRelation.getCDCRelation(sqlContext, metaClient, cdcOptions)
           .buildScan0(HoodieCDCUtils.CDC_COLUMNS, Array.empty)
 
-        sqlContext.sparkSession.internalCreateDataFrame(rdd, CDCRelation.FULL_CDC_SPARK_SCHEMA, isStreaming = true)
+        DataFrameUtil.createFromInternalRows(sqlContext.sparkSession, CDCRelation.FULL_CDC_SPARK_SCHEMA, rdd)
       } else {
         // Consume the data between (startCommitTime, endCommitTime]
         val incParams = parameters ++ Map(
@@ -182,7 +182,7 @@ class HoodieStreamSource(
               .asInstanceOf[RDD[InternalRow]]
           case _ => throw new IllegalArgumentException(s"UnSupport tableType: $tableType")
         }
-        sqlContext.internalCreateDataFrame(rdd, schema, isStreaming = true)
+        DataFrameUtil.createFromInternalRows(sqlContext.sparkSession, schema, rdd)
       }
     }
   }

@@ -23,6 +23,7 @@ import org.apache.spark.sql.execution.datasources.jdbc.JdbcUtils
 import org.apache.spark.sql.jdbc.JdbcDialect
 import org.apache.spark.sql.types.StructType
 
+import java.sql.Connection
 import java.sql.ResultSet
 
 /**
@@ -59,6 +60,30 @@ object SparkJdbcUtils {
     //      dialect: JdbcDialect,
     //      alwaysNullable: Boolean = false,
     //      isTimestampNTZ: Boolean = false): StructType
-    JdbcUtils.getSchema(resultSet, dialect, alwaysNullable)
+    val methods = JdbcUtils.getClass.getMethods.filter(_.getName == "getSchema")
+    val maybeMethod = methods.find { m =>
+      val p = m.getParameterTypes
+      p.length >= 3 && p.contains(classOf[ResultSet]) && p.contains(classOf[JdbcDialect])
+    }
+
+    maybeMethod match {
+      case Some(method) =>
+        val paramTypes = method.getParameterTypes
+        val args = paramTypes.map {
+          case p if p == classOf[Connection] =>
+            Option(resultSet.getStatement).map(_.getConnection).orNull
+          case p if p == classOf[ResultSet] =>
+            resultSet
+          case p if p == classOf[JdbcDialect] =>
+            dialect
+          case p if p == java.lang.Boolean.TYPE =>
+            Boolean.box(alwaysNullable)
+          case _ =>
+            null
+        }
+        method.invoke(JdbcUtils, args: _*).asInstanceOf[StructType]
+      case None =>
+        throw new IllegalStateException("Unable to resolve JdbcUtils.getSchema signature")
+    }
   }
 }

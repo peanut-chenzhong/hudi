@@ -25,7 +25,8 @@ import org.apache.spark.sql.catalyst.catalog.HoodieCatalogTable
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.hudi.HoodieSqlCommonUtils._
 import org.apache.spark.sql.hudi.ProvidesHoodieConfig
-import org.apache.spark.sql.{AnalysisException, Row, SaveMode, SparkSession}
+import org.apache.spark.sql.hudi.HoodieAnalysisExceptionUtils
+import org.apache.spark.sql.{Row, SaveMode, SparkSession}
 
 case class AlterHoodieTableDropPartitionCommand(
    tableIdentifier: TableIdentifier,
@@ -42,7 +43,7 @@ case class AlterHoodieTableDropPartitionCommand(
     val hoodieCatalogTable = HoodieCatalogTable(sparkSession, tableIdentifier)
 
     if (!hoodieCatalogTable.isPartitionedTable) {
-      throw new AnalysisException(s"$fullTableName is a non-partitioned table that is not allowed to drop partition")
+      throw HoodieAnalysisExceptionUtils.analysisException(s"$fullTableName is a non-partitioned table that is not allowed to drop partition")
     }
 
     DDLUtils.verifyAlterTableType(

@@ -27,7 +27,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.codegen.LazilyGeneratedOrdering
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, BoundReference, SortOrder, UnsafeProjection, UnsafeRow}
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{DataFrame, Row}
+import org.apache.spark.sql.{DataFrame, DataFrameUtil, Row}
 import org.apache.spark.util.MutablePair
 import org.apache.spark.util.random.SamplingUtils
 import org.davidmoten.hilbert.HilbertCurve
@@ -536,7 +536,7 @@ object RangeSampleSort {
           mutablePair.update(unsafeRow, zValues)
         }
       }.sortBy(x => ByteArraySorting(x._2), numPartitions = fileNum).map(_._1)
-      spark.internalCreateDataFrame(indexRdd, schema)
+      DataFrameUtil.createFromInternalRows(spark, schema, indexRdd)
     }
   }
 }

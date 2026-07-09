@@ -28,6 +28,10 @@ jobs:
         include:
           - scalaProfile: 'scala-2.13'
             flinkProfile: 'flink1.18'
+            sparkProfile: 'spark4.0'
+            sparkRuntime: 'spark4.0.0'
+          - scalaProfile: 'scala-2.13'
+            flinkProfile: 'flink1.18'
             sparkProfile: 'spark3.5'
             sparkRuntime: 'spark3.5.0'
           - scalaProfile: 'scala-2.12'
@@ -85,6 +89,7 @@ jobs:
           SPARK_PROFILE: ${{ matrix.sparkProfile }}
           SPARK_RUNTIME: ${{ matrix.sparkRuntime }}
           SCALA_PROFILE: ${{ matrix.scalaProfile }}
+        if: ${{ env.SPARK_PROFILE != 'spark4.0' }} # Spark4 docker runtime validation is not enabled yet
         run: |
           ./packaging/bundle-validation/ci_run.sh hudi_docker_java8 $HUDI_VERSION openjdk8 $STAGING_REPO_NUM
       - name: IT - Bundle Validation - OpenJDK 11
@@ -93,7 +98,7 @@ jobs:
           SPARK_PROFILE: ${{ matrix.sparkProfile }}
           SPARK_RUNTIME: ${{ matrix.sparkRuntime }}
           SCALA_PROFILE: ${{ matrix.scalaProfile }}
-        if: ${{ env.SPARK_PROFILE >= 'spark3' }} # Only run validation on Spark 3
+        if: ${{ env.SPARK_PROFILE >= 'spark3' && env.SPARK_PROFILE != 'spark4.0' }} # Spark4 docker runtime validation is not enabled yet
         run: |
           ./packaging/bundle-validation/ci_run.sh hudi_docker_java11 $HUDI_VERSION openjdk11 $STAGING_REPO_NUM
       - name: IT - Bundle Validation - OpenJDK 17
@@ -102,6 +107,6 @@ jobs:
           SPARK_PROFILE: ${{ matrix.sparkProfile }}
           SPARK_RUNTIME: ${{ matrix.sparkRuntime }}
           SCALA_PROFILE: ${{ matrix.scalaProfile }}
-        if: ${{ env.SPARK_PROFILE >= 'spark3.3' }} # Only Spark 3.3 and above support Java 17
+        if: ${{ env.SPARK_PROFILE >= 'spark3.3' && env.SPARK_PROFILE != 'spark4.0' }} # Spark4 docker runtime validation is not enabled yet
         run: |
           ./packaging/bundle-validation/ci_run.sh hudi_docker_java17 $HUDI_VERSION openjdk17 $STAGING_REPO_NUM

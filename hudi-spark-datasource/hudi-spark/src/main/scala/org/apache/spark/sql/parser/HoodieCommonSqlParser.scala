@@ -54,6 +54,8 @@ class HoodieCommonSqlParser(session: SparkSession, delegate: ParserInterface)
 
   override def parseTableSchema(sqlText: String): StructType = delegate.parseTableSchema(sqlText)
 
+  override def parseRoutineParam(sqlText: String): StructType = delegate.parseRoutineParam(sqlText)
+
   override def parseDataType(sqlText: String): DataType = delegate.parseDataType(sqlText)
 
   /**
@@ -108,7 +110,24 @@ class HoodieCommonSqlParser(session: SparkSession, delegate: ParserInterface)
         throw e.withCommand(command)
       case e: AnalysisException =>
         val position = Origin(e.line, e.startPosition)
-        throw new ParseException(Option(command), e.message, position, position)
+        throw buildParseException(command, e.message, position)
+    }
+  }
+
+  private def buildParseException(command: String, message: String, position: Origin): Throwable = {
+    try {
+      val ctor = classOf[ParseException]
+        .getConstructor(classOf[Option[String]], classOf[String], classOf[Origin], classOf[Origin])
+      ctor.newInstance(Option(command), message, position, position)
+    } catch {
+      case _: Throwable =>
+        try {
+          val ctor = classOf[ParseException]
+            .getConstructor(classOf[String], classOf[Map[String, String]], classOf[org.antlr.v4.runtime.ParserRuleContext])
+          ctor.newInstance("PARSE_SYNTAX_ERROR", Map("error" -> message), null)
+        } catch {
+          case _: Throwable => new RuntimeException(message)
+        }
     }
   }
 }
